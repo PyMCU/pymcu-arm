@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "development", "feature/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  integration:
+    name: Integration Tests (RP2040)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/pymcu/pymcu:latest
+      options: --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout pymcu-rp2040
+        uses: actions/checkout@v4
+        with:
+          path: pymcu-rp2040
+
+      # Checkout monorepo to build pymcuc compiler and install SDKs.
+      # TODO: replace with `pip install pymcu-compiler` once published to PyPI.
+      - name: Checkout pymcu monorepo
+        uses: actions/checkout@v4
+        with:
+          repository: PyMCU/PyMCU
+          path: pymcu
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.x"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build pymcuc compiler
+        working-directory: pymcu
+        run: |
+          dotnet publish src/compiler/PyMCU.csproj \
+            -c Release -o ../pymcu-rp2040/build/bin --nologo
+
+      - name: Build pymcuc-rp2040 backend CLI
+        working-directory: pymcu-rp2040
+        run: |
+          dotnet publish src/csharp/cli/PyMCU.Backend.RP2040.Cli.csproj \
+            -c Release -o build/bin --nologo
+
+      - name: Install Python dependencies
+        working-directory: pymcu-rp2040
+        run: |
+          uv venv .venv
+          uv pip install --python .venv ../pymcu/extensions/pymcu-toolchain-sdk
+          uv pip install --python .venv ../pymcu/extensions/pymcu-backend-sdk
+          uv pip install --python .venv ../pymcu/lib
+          uv pip install --python .venv -e ../pymcu
+          uv pip install --python .venv -e . --no-deps
+
+      - name: Configure environment
+        working-directory: pymcu-rp2040
+        run: |
+          echo "$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin" >> $GITHUB_PATH
+          echo "$GITHUB_WORKSPACE/pymcu-rp2040/build/bin" >> $GITHUB_PATH
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/pymcu-rp2040/.venv" >> $GITHUB_ENV
+
+      - name: Restore integration test packages
+        working-directory: pymcu-rp2040
+        run: dotnet restore tests/integration/PyMCU.IntegrationTests.csproj --nologo
+
+      - name: Run integration tests
+        working-directory: pymcu-rp2040
+        run: |
+          dotnet test tests/integration/PyMCU.IntegrationTests.csproj \
+            --no-restore \
+            --logger "trx;LogFileName=integration-results.trx" \
+            --logger "console;verbosity=normal" \
+            --blame-hang-timeout 120s \
+            --results-directory test-results \
+            --nologo \
+            -- NUnit.NumberOfTestWorkers=1
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: pymcu-rp2040/test-results/
+          retention-days: 15

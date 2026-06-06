@@ -19,19 +19,19 @@ public static class PymcuCompiler
     private static readonly ConcurrentDictionary<string, Lazy<byte[]>> BinCache = new();
 
     /// <summary>
-    /// Compiles the RP2040 example at <c>examples/rp2040/{name}</c> and returns
+    /// Compiles the RP2040 example at <c>examples/{name}</c> and returns
     /// the flat flash image (<c>dist/firmware.bin</c>) for PicoSimulation.LoadFlash.
     /// </summary>
     public static byte[] BuildRp2040(string name)
         => BinCache.GetOrAdd("rp:ex:" + name,
-            _ => new Lazy<byte[]>(() => CompileBin(Path.Combine(RepoRoot, "examples", "rp2040", name), name))).Value;
+            _ => new Lazy<byte[]>(() => CompileBin(Path.Combine(RepoRoot, "examples", name), name))).Value;
 
     /// <summary>
-    /// Compiles the RP2040 fixture at <c>tests/integration/fixtures/rp2040/{name}</c>.
+    /// Compiles the RP2040 fixture at <c>tests/integration/fixtures/{name}</c>.
     /// </summary>
     public static byte[] BuildFixtureRp2040(string name)
         => BinCache.GetOrAdd("rp:fx:" + name,
-            _ => new Lazy<byte[]>(() => CompileBin(Path.Combine(RepoRoot, "tests", "integration", "fixtures", "rp2040", name), name))).Value;
+            _ => new Lazy<byte[]>(() => CompileBin(Path.Combine(RepoRoot, "tests", "integration", "fixtures", name), name))).Value;
 
     private static byte[] CompileBin(string projectDir, string name)
     {
@@ -81,11 +81,12 @@ public static class PymcuCompiler
         var dir = AppContext.BaseDirectory;
         while (dir != null)
         {
-            if (Directory.Exists(Path.Combine(dir, "examples", "rp2040")))
+            if (File.Exists(Path.Combine(dir, "hatch_build.py")) &&
+                Directory.Exists(Path.Combine(dir, "examples")))
                 return dir;
             dir = Directory.GetParent(dir)?.FullName;
         }
         throw new DirectoryNotFoundException(
-            "Cannot locate PyMCU repo root (no examples/rp2040 directory found).");
+            "Cannot locate pymcu-rp2040 repo root (no hatch_build.py + examples/ found).");
     }
 }

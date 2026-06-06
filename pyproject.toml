@@ -13,8 +13,7 @@ authors = [
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "pymcu-backend-sdk>=0.1.0a1",
-    "pymcu-toolchain-sdk>=0.1.0a1",
+    "pymcu-sdk>=0.1.0a1",
     # The vendored LLVM toolchain lives in its own repository
     # (~/Repos/pymcu-rp2040-toolchain, published to PyPI as
     # pymcu-rp2040-toolchain, analogous to avr-gcc-build -> pymcu-avr-toolchain).
@@ -33,8 +32,8 @@ rp2040 = "pymcu.backend.rp2040:Rp2040BackendPlugin"
 rp2040 = "pymcu.toolchain.rp2040:Rp2040ToolchainPlugin"
 
 [tool.uv.sources]
-pymcu-backend-sdk = {git = "https://github.com/PyMCU/pymcu", subdirectory = "extensions/pymcu-backend-sdk"}
-pymcu-toolchain-sdk = {git = "https://github.com/PyMCU/pymcu", subdirectory = "extensions/pymcu-toolchain-sdk"}
+pymcu-sdk = {git = "https://github.com/PyMCU/pymcu", subdirectory = "extensions/pymcu-sdk"}
+
 
 [project.urls]
 Homepage = "https://github.com/PyMCU/pymcu-rp2040"

@@ -30,11 +30,11 @@ jobs:
     steps:
       # Both repos checked out as siblings so the relative csproj path
       # ../../../../pymcu/extensions/pymcu-sdk/csharp/PyMCU.Backend.SDK.csproj
-      # resolves correctly from src/csharp/lib/ inside pymcu-rp2040/.
-      - name: Checkout pymcu-rp2040
+      # resolves correctly from src/csharp/lib/ inside pymcu-arm/.
+      - name: Checkout pymcu-arm
         uses: actions/checkout@v4
         with:
-          path: pymcu-rp2040
+          path: pymcu-arm
 
       - name: Checkout pymcu monorepo (SDK dependency)
         uses: actions/checkout@v4
@@ -55,7 +55,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Build wheel
-        working-directory: pymcu-rp2040
+        working-directory: pymcu-arm
         env:
           DOTNET_RID: ${{ matrix.dotnet_rid }}
           WHEEL_PLATFORM_TAG: ${{ matrix.wheel_platform_tag }}
@@ -65,7 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.name }}
-          path: pymcu-rp2040/dist/*.whl
+          path: pymcu-arm/dist/*.whl
           retention-days: 15
 
   publish-pypi:
@@ -89,4 +89,3 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish dist/*
-

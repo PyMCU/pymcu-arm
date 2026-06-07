@@ -2,9 +2,9 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <RootNamespace>PyMCU.Backend.RP2040.Cli</RootNamespace>
-    <AssemblyName>pymcuc-rp2040</AssemblyName>
-    <!-- MIT: free RP2040 backend CLI. -->
+    <RootNamespace>PyMCU.Backend.ARM.Cli</RootNamespace>
+    <AssemblyName>pymcuc-arm</AssemblyName>
+    <!-- MIT: free ARM backend CLI. -->
     <!-- SPDX-License-Identifier: MIT -->
     <PublishAot>true</PublishAot>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -12,7 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\lib\PyMCU.Backend.RP2040.csproj" />
+    <ProjectReference Include="..\lib\PyMCU.Backend.ARM.csproj" />
   </ItemGroup>
 
   <ItemGroup>

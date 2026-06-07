@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// pymcuc-rp2040 - AOT-compiled RP2040 backend runner.
+// pymcuc-arm - AOT-compiled RP2040 backend runner.
 //
 // Usage:
-//   pymcuc-rp2040 <ir-file.mir> --output <firmware.ll> --target <chip> --freq <hz>
+//   pymcuc-arm <ir-file.mir> --output <firmware.ll> --target <chip> --freq <hz>
 //                               [--config KEY=VALUE]... [--reset-vector N]
 //                               [--interrupt-vector N] [--verbose]
 //
@@ -69,7 +69,7 @@ var verboseOpt = new Option<bool>("--verbose", "-v")
     DefaultValueFactory = _ => false
 };
 
-var rootCmd = new RootCommand("pymcuc-rp2040 - PyMCU RP2040 (LLVM IR) backend runner");
+var rootCmd = new RootCommand("pymcuc-arm - PyMCU RP2040 (LLVM IR) backend runner");
 rootCmd.Arguments.Add(irFileArg);
 rootCmd.Options.Add(outputOpt);
 rootCmd.Options.Add(targetOpt);
@@ -112,7 +112,7 @@ rootCmd.SetAction(pr =>
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"[pymcuc-rp2040] Failed to read IR file '{irFile}': {ex.Message}");
+        Console.Error.WriteLine($"[pymcuc-arm] Failed to read IR file '{irFile}': {ex.Message}");
         Environment.ExitCode = 1;
         return;
     }
@@ -142,7 +142,7 @@ rootCmd.SetAction(pr =>
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"[pymcuc-rp2040] Codegen failed: {ex.Message}");
+        Console.Error.WriteLine($"[pymcuc-arm] Codegen failed: {ex.Message}");
         if (verbose) Console.Error.WriteLine(ex.StackTrace);
         Environment.ExitCode = 1;
     }

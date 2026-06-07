@@ -3,14 +3,14 @@
   <PropertyGroup>
     <OutputType>Library</OutputType>
     <RootNamespace>PyMCU</RootNamespace>
-    <AssemblyName>PyMCU.Backend.RP2040</AssemblyName>
-    <!-- MIT: RP2040 backend is free and open source. -->
+    <AssemblyName>PyMCU.Backend.ARM</AssemblyName>
+    <!-- MIT: ARM backend is free and open source. -->
     <!-- SPDX-License-Identifier: MIT -->
   </PropertyGroup>
 
   <ItemGroup>
     <!-- pymcu-sdk lives in the PyMCU/pymcu monorepo.
-         Expects both repos checked out as siblings: ../pymcu/ next to ../pymcu-rp2040/ -->
+         Expects both repos checked out as siblings: ../pymcu/ next to ../pymcu-arm/ -->
     <ProjectReference Include="..\..\..\..\pymcu\extensions\pymcu-sdk\csharp\PyMCU.Backend.SDK.csproj" />
   </ItemGroup>
 

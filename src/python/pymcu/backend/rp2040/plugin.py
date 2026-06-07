@@ -14,7 +14,7 @@
 """
 Rp2040BackendPlugin -- PyMCU RP2040 (Cortex-M0+) codegen backend.
 
-Wraps the ``pymcuc-rp2040`` AOT-compiled binary bundled inside this wheel.  The
+Wraps the ``pymcuc-arm`` AOT-compiled binary bundled inside this wheel.  The
 binary reads a ``.mir`` IR file produced by ``pymcuc --emit-ir`` and emits an
 LLVM IR text file (``.ll``); the rp2040 toolchain plugin then drives LLVM to
 turn it into a flashable image.
@@ -38,10 +38,10 @@ class Rp2040BackendPlugin(BackendPlugin):
 
     @classmethod
     def get_backend_binary(cls) -> Path:
-        """Return the path to the bundled ``pymcuc-rp2040`` binary."""
+        """Return the path to the bundled ``pymcuc-arm`` binary."""
         package_dir = Path(__file__).parent
 
-        binary_name = "pymcuc-rp2040.exe" if sys.platform == "win32" else "pymcuc-rp2040"
+        binary_name = "pymcuc-arm.exe" if sys.platform == "win32" else "pymcuc-arm"
 
         # 1. Wheel layout: binary sits next to this Python module.
         adjacent = package_dir / binary_name
@@ -50,15 +50,15 @@ class Rp2040BackendPlugin(BackendPlugin):
             return adjacent
 
         # 2. Development fallback: dotnet publish output (build/bin).
-        # package_dir = .../extensions/pymcu-rp2040/src/python/pymcu/backend/rp2040
+        # package_dir = .../extensions/pymcu-arm/src/python/pymcu/backend/rp2040
         repo_root = package_dir.parents[6]
         dev_path = repo_root / "build" / "bin" / binary_name
         if dev_path.exists():
             cls._ensure_signed(dev_path)
             return dev_path
 
-        # 3. extensions/pymcu-rp2040/src/csharp/cli built output (dev shortcut).
-        backend_root = package_dir.parents[4]  # .../extensions/pymcu-rp2040
+        # 3. extensions/pymcu-arm/src/csharp/cli built output (dev shortcut).
+        backend_root = package_dir.parents[4]  # .../extensions/pymcu-arm
         runner_debug = (
             backend_root / "src" / "csharp" / "cli"
             / "bin" / "Debug" / "net10.0" / binary_name
@@ -69,7 +69,7 @@ class Rp2040BackendPlugin(BackendPlugin):
 
         # 4. System PATH.
         import shutil
-        which_result = shutil.which("pymcuc-rp2040")
+        which_result = shutil.which("pymcuc-arm")
         if which_result:
             return Path(which_result)
 

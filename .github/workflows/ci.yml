@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: PyMCU/PyMCU
+          ref: development  # TODO: remove after PR #34 is merged to main
           path: pymcu
 
       - name: Set up .NET 10

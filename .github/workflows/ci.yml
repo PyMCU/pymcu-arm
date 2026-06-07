@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: PyMCU/PyMCU
-          ref: development  # TODO: remove after PR #34 is merged to main
+          ref: main
           path: pymcu
           submodules: false
 
@@ -68,7 +68,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: PyMCU/PyMCU
-          ref: development  # TODO: remove after PR #34 is merged to main
+          ref: main
           path: pymcu
           submodules: recursive
 

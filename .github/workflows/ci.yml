@@ -26,7 +26,7 @@ jobs:
         with:
           path: pymcu-rp2040
 
-      # Checkout monorepo to build pymcuc compiler and install SDKs.
+      # Checkout monorepo only to build pymcuc (compiler binary).
       # TODO: replace with `pip install pymcu-compiler` once published to PyPI.
       - name: Checkout pymcu monorepo
         uses: actions/checkout@v4
@@ -60,9 +60,7 @@ jobs:
         working-directory: pymcu-rp2040
         run: |
           uv venv .venv
-          uv pip install --python .venv ../pymcu/extensions/pymcu-toolchain-sdk
-          uv pip install --python .venv ../pymcu/extensions/pymcu-backend-sdk
-          uv pip install --python .venv ../pymcu/lib
+          uv pip install --python .venv pymcu-sdk pymcu-stdlib
           uv pip install --python .venv -e ../pymcu
           uv pip install --python .venv -e . --no-deps
 

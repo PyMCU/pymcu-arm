@@ -12,13 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
-    container:
-      image: ghcr.io/pymcu/pymcu:latest
-      options: --user root
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout pymcu-rp2040
@@ -26,7 +19,7 @@ jobs:
         with:
           path: pymcu-rp2040
 
-      # Checkout monorepo only to build pymcuc (compiler binary).
+      # Checkout monorepo to build pymcuc (compiler binary).
       # TODO: replace with `pip install pymcu-compiler` once published to PyPI.
       - name: Checkout pymcu monorepo
         uses: actions/checkout@v4
@@ -43,6 +36,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Build pymcuc compiler
         working-directory: pymcu

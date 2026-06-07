@@ -7,6 +7,49 @@ on:
     branches: ["main"]
 
 jobs:
+  build:
+    name: Build C# (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout pymcu-rp2040
+        uses: actions/checkout@v4
+        with:
+          path: pymcu-rp2040
+
+      - name: Checkout pymcu monorepo
+        uses: actions/checkout@v4
+        with:
+          repository: PyMCU/PyMCU
+          ref: development  # TODO: remove after PR #34 is merged to main
+          path: pymcu
+          submodules: false
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.x"
+
+      - name: Build pymcuc compiler
+        shell: bash
+        working-directory: pymcu
+        run: dotnet publish src/compiler/PyMCU.csproj -c Release -o ../pymcu-rp2040/build/bin --nologo
+
+      - name: Build pymcuc-rp2040 backend CLI
+        shell: bash
+        working-directory: pymcu-rp2040
+        run: dotnet publish src/csharp/cli/PyMCU.Backend.RP2040.Cli.csproj -c Release -o build/bin --nologo
+
+  # ---------------------------------------------------------------------------
+  # Full integration tests (RP2040 LLVM pipeline). Linux only — uses native
+  # LLVM tools downloaded by pymcu-rp2040-toolchain for the linux-x64 platform.
+  # ---------------------------------------------------------------------------
   integration:
     name: Integration Tests (RP2040)
     runs-on: ubuntu-latest

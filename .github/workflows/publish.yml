@@ -1,0 +1,117 @@
+name: Publish Wheels
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-wheels:
+    name: Build wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+          - name: macos-arm64
+            os: macos-latest
+          - name: macos-x64
+            os: macos-latest
+            dotnet_rid: osx-x64
+            wheel_platform_tag: macosx_13_0_x86_64
+          - name: windows-x64
+            os: windows-latest
+
+    steps:
+      - name: Checkout pymcu-rp2040
+        uses: actions/checkout@v4
+
+      - name: Checkout pymcu monorepo (SDK dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: PyMCU/PyMCU
+          ref: main
+          path: pymcu
+          sparse-checkout: |
+            extensions/pymcu-sdk/csharp
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.x"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build wheel
+        env:
+          DOTNET_RID: ${{ matrix.dotnet_rid }}
+          WHEEL_PLATFORM_TAG: ${{ matrix.wheel_platform_tag }}
+        run: uv build --wheel
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*.whl
+          retention-days: 15
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-wheels]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Publish to PyPI
+        run: uv publish dist/*
+
+  publish-gitea:
+    name: Publish to Gitea (private index)
+    needs: [build-wheels]
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: gitea
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Connect to Headscale network
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.HEADSCALE_AUTH_KEY }}
+          args: --login-server ${{ secrets.HEADSCALE_URL }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Publish to Gitea
+        run: |
+          uv publish \
+            --publish-url "${{ secrets.PRIVATE_PYPI_URL }}" \
+            --username "${{ secrets.PRIVATE_PYPI_USERNAME }}" \
+            --password "${{ secrets.PRIVATE_PYPI_TOKEN }}" \
+            dist/*

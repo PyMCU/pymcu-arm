@@ -27,6 +27,7 @@ jobs:
           repository: PyMCU/PyMCU
           ref: development  # TODO: remove after PR #34 is merged to main
           path: pymcu
+          submodules: recursive
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -59,9 +60,13 @@ jobs:
         working-directory: pymcu-rp2040
         run: |
           uv venv .venv
-          uv pip install --python .venv pymcu-sdk pymcu-stdlib
+          uv pip install --python .venv pymcu-sdk
+          uv pip install --python .venv -e ../pymcu/lib  # development stdlib
+          uv pip install --python .venv pymcu-rp2040-toolchain
           uv pip install --python .venv -e ../pymcu
           uv pip install --python .venv -e . --no-deps
+          uv pip install --python .venv -e ../pymcu/external/pymcu-micropython
+          uv pip install --python .venv -e ../pymcu/external/pymcu-circuitpython
 
       - name: Configure environment
         working-directory: pymcu-rp2040
@@ -69,6 +74,18 @@ jobs:
           echo "$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin" >> $GITHUB_PATH
           echo "$GITHUB_WORKSPACE/pymcu-rp2040/build/bin" >> $GITHUB_PATH
           echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/pymcu-rp2040/.venv" >> $GITHUB_ENV
+
+      - name: Verify RP2040 toolchain
+        working-directory: pymcu-rp2040
+        run: |
+          BIN=$("$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin/python3" -c \
+            "import pymcu_rp2040_toolchain; d=pymcu_rp2040_toolchain.bundled_bin_dir(); print(d or '')" | tail -1)
+          if [ -n "$BIN" ]; then
+            find "$BIN" -type f -exec chmod +x {} \; 2>/dev/null || true
+            "$BIN/llc" --version | head -2
+          else
+            echo "No bundled bin dir; toolchain will be fetched on demand"
+          fi
 
       - name: Restore integration test packages
         working-directory: pymcu-rp2040

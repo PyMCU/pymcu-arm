@@ -34,7 +34,7 @@ jobs:
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "10.x"
+          global-json-file: pymcu/global.json
 
       - name: Build pymcuc compiler
         shell: bash
@@ -75,7 +75,7 @@ jobs:
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "10.x"
+          global-json-file: pymcu/global.json
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5

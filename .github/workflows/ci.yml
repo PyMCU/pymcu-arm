@@ -75,6 +75,18 @@ jobs:
           echo "$GITHUB_WORKSPACE/pymcu-rp2040/build/bin" >> $GITHUB_PATH
           echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/pymcu-rp2040/.venv" >> $GITHUB_ENV
 
+      - name: Pre-seed RP2040 toolchain cache
+        # get_tool() downloads 300+ MB from GitHub Releases on first call.
+        # Run it here (outside the 120s test timeout) so the tools are cached
+        # before the integration tests trigger them via Rp2040LlvmToolchain.
+        working-directory: pymcu-rp2040
+        run: |
+          "$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin/python3" -c "
+          import pymcu_rp2040_toolchain as tc
+          for name in tc.TOOLS:
+              print(name, '->', tc.get_tool(name))
+          "
+
       - name: Restore integration test packages
         working-directory: pymcu-rp2040
         run: dotnet restore tests/integration/PyMCU.IntegrationTests.csproj --nologo

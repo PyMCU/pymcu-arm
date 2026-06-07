@@ -75,17 +75,17 @@ jobs:
           echo "$GITHUB_WORKSPACE/pymcu-rp2040/build/bin" >> $GITHUB_PATH
           echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/pymcu-rp2040/.venv" >> $GITHUB_ENV
 
-      - name: Verify RP2040 toolchain
+      - name: Install RP2040 LLVM toolchain
         working-directory: pymcu-rp2040
         run: |
-          BIN=$("$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin/python3" -c \
-            "import pymcu_rp2040_toolchain; d=pymcu_rp2040_toolchain.bundled_bin_dir(); print(d or '')" | tail -1)
-          if [ -n "$BIN" ]; then
-            find "$BIN" -type f -exec chmod +x {} \; 2>/dev/null || true
-            "$BIN/llc" --version | head -2
-          else
-            echo "No bundled bin dir; toolchain will be fetched on demand"
-          fi
+          # Fetch LLVM binaries to the user cache (~/.pymcu/tools/…).
+          # pymcu-rp2040-toolchain wheels don't bundle binaries; they must be
+          # downloaded once per runner and then re-used via the cache dir.
+          "$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin/python3" \
+            -m pymcu_rp2040_toolchain fetch --cache
+          # Verify tools are accessible
+          "$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin/python3" \
+            -c "import pymcu_rp2040_toolchain; print(pymcu_rp2040_toolchain.get_tool('llc'))"
 
       - name: Restore integration test packages
         working-directory: pymcu-rp2040

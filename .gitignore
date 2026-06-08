@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# hatch
+.hatch/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+test-results/
+
+# .NET
+bin/
+obj/
+*.user
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.sln.DotSettings.user

@@ -14,15 +14,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
     "pymcu-sdk>=0.1.0a1",
-    # The vendored LLVM toolchain lives in its own repository
-    # (~/Repos/pymcu-arm-toolchain, published to PyPI as
-    # pymcu-arm-toolchain, analogous to avr-gcc-build -> pymcu-avr-toolchain).
-    # It bundles opt/llc/llvm-mc/ld.lld/llvm-objcopy and Rp2040LlvmToolchain
-    # prefers it via `import pymcu_arm_toolchain`. Until the wheel is on PyPI
-    # the driver falls back to a system LLVM on PATH (e.g. `brew install llvm
-    # lld`). Once published, add the gated dependency so the arm extra is
-    # self-contained:
-    #   "pymcu-arm-toolchain>=19.1.7; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+    "pymcu-arm-toolchain>=22.1.7; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'linux' and platform_machine == 'aarch64') or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
 ]
 
 [project.entry-points."pymcu.backends"]

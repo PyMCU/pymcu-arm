@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pymcu-arm"
-version = "0.1.0a1.post0"
+version = "0.1.0a1.post1"
 description = "ARM (Cortex-M) support for pymcu-compiler: LLVM-IR codegen backend + LLVM toolchain driver"
 readme = "README.md"
 authors = [

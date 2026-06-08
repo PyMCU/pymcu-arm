@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pymcu-arm"
-version = "0.1.0a1"
+version = "0.1.0a1.post0"
 description = "ARM (Cortex-M) support for pymcu-compiler: LLVM-IR codegen backend + LLVM toolchain driver"
 readme = "README.md"
 authors = [
@@ -22,6 +22,9 @@ rp2040 = "pymcu.backend.rp2040:Rp2040BackendPlugin"
 
 [project.entry-points."pymcu.toolchains"]
 rp2040 = "pymcu.toolchain.rp2040:Rp2040ToolchainPlugin"
+
+[project.entry-points."pymcu.programmers"]
+rp2040 = "pymcu.programmer.rp2040:Rp2040Programmer"
 
 [tool.uv.sources]
 pymcu-sdk = {git = "https://github.com/PyMCU/pymcu", subdirectory = "extensions/pymcu-sdk"}

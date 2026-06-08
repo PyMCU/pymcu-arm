@@ -77,7 +77,7 @@ class Rp2040LlvmToolchain(ExternalToolchain):
             return False
 
     def install(self) -> None:
-        # The vendored pymcu-rp2040-toolchain wheel (or a system LLVM) provides
+        # The vendored pymcu-arm-toolchain wheel (or a system LLVM) provides
         # the binaries. If the wheel is installed but its binaries have not been
         # staged yet, stage them now (download the pinned LLVM into the cache).
         if not self.is_cached():
@@ -93,14 +93,14 @@ class Rp2040LlvmToolchain(ExternalToolchain):
             raise RuntimeError(
                 "LLVM tools not found: " + ", ".join(missing) + ".\n"
                 "Install the vendored toolchain (pip install pymcu[rp2040]) and run\n"
-                "  python -m pymcu_rp2040_toolchain fetch --cache\n"
+                "  python -m pymcu_arm_toolchain fetch --cache\n"
                 "or provide a system LLVM (e.g. `brew install llvm lld`)."
             )
 
     def _try_stage_wheel(self) -> None:
         """Ask the vendored wheel to stage its LLVM tools into the cache."""
         try:
-            from pymcu_rp2040_toolchain._fetch import fetch  # noqa: PLC0415
+            from pymcu_arm_toolchain._fetch import fetch  # noqa: PLC0415
             fetch(target="cache", console=self.console)
         except Exception:
             # Wheel absent or staging failed; _find_bin falls back to PATH and
@@ -110,14 +110,14 @@ class Rp2040LlvmToolchain(ExternalToolchain):
     # ── binary / runtime resolution ──────────────────────────────────────────
 
     def _find_bin_from_wheel(self, name: str) -> Optional[str]:
-        """Resolve *name* via the vendored pymcu-rp2040-toolchain wheel, if present.
+        """Resolve *name* via the vendored pymcu-arm-toolchain wheel, if present.
 
         The wheel (analogue of pymcu-avr-toolchain) bundles the LLVM tools or
         stages them into the shared cache and exposes get_tool(). It is the
         authoritative, reproducible source; system LLVM is only a fallback.
         """
         try:
-            import pymcu_rp2040_toolchain as _whl  # noqa: PLC0415
+            import pymcu_arm_toolchain as _whl  # noqa: PLC0415
             return str(_whl.get_tool(name))
         except (ImportError, FileNotFoundError):
             return None
@@ -143,7 +143,7 @@ class Rp2040LlvmToolchain(ExternalToolchain):
         if found:
             return found
         raise FileNotFoundError(
-            f"Required LLVM tool '{name}' not found (pymcu-rp2040-toolchain "
+            f"Required LLVM tool '{name}' not found (pymcu-arm-toolchain "
             f"wheel, cache, {', '.join(_LLVM_SEARCH_DIRS)}, or PATH)."
         )
 
@@ -153,9 +153,9 @@ class Rp2040LlvmToolchain(ExternalToolchain):
         bundled = Path(__file__).parent / "runtime"
         if (bundled / "rp2040.ld").exists():
             return bundled
-        # 2. Development checkout: extensions/pymcu-rp2040/src/runtime.
+        # 2. Development checkout: extensions/pymcu-arm/src/runtime.
         #    __file__ = .../src/python/pymcu/toolchain/rp2040/llvm.py
-        ext_root = Path(__file__).parents[5]   # .../extensions/pymcu-rp2040
+        ext_root = Path(__file__).parents[5]   # .../extensions/pymcu-arm
         dev = ext_root / "src" / "runtime"
         if (dev / "rp2040.ld").exists():
             return dev

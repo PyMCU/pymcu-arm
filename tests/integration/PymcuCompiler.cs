@@ -44,6 +44,10 @@ public static class PymcuCompiler
         return File.ReadAllBytes(binFile);
     }
 
+    private static readonly bool Verbose =
+        Environment.GetEnvironmentVariable("PYMCU_VERBOSE") == "1" ||
+        Environment.GetEnvironmentVariable("RUNNER_DEBUG")  == "1";
+
     private static void RunPymcuBuild(string projectDir, string name)
     {
         if (!Directory.Exists(projectDir))
@@ -60,7 +64,8 @@ public static class PymcuCompiler
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        psi.Environment["PYMCU_VERBOSE"] = "1";
+        if (Verbose)
+            psi.Environment["PYMCU_VERBOSE"] = "1";
         psi.Environment["PATH"] = venvBin + Path.PathSeparator + psi.Environment["PATH"];
 
         using var proc = Process.Start(psi)
@@ -70,6 +75,21 @@ public static class PymcuCompiler
         var finished = proc.WaitForExit(120_000);
         var stdout = stdoutTask.GetAwaiter().GetResult();
         var stderr = stderrTask.GetAwaiter().GetResult();
+
+        var failed = !finished || proc.ExitCode != 0;
+        if (failed || Verbose)
+        {
+            if (failed)
+            {
+                Console.WriteLine($"[PymcuCompiler] Build failed: {name}");
+                Console.WriteLine($"[PymcuCompiler] RepoRoot   : {RepoRoot}");
+                Console.WriteLine($"[PymcuCompiler] ProjectDir : {projectDir}");
+                Console.WriteLine($"[PymcuCompiler] PATH       : {psi.Environment["PATH"]}");
+            }
+            Console.WriteLine($"[PymcuCompiler] Exit: {(finished ? proc.ExitCode.ToString() : "TIMEOUT")}");
+            if (!string.IsNullOrWhiteSpace(stdout)) Console.WriteLine($"stdout:\n{stdout}");
+            if (!string.IsNullOrWhiteSpace(stderr)) Console.WriteLine($"stderr:\n{stderr}");
+        }
 
         if (!finished) { proc.Kill(); throw new TimeoutException($"pymcu build timed out for '{name}'.\n{stdout}\n{stderr}"); }
         if (proc.ExitCode != 0)
@@ -87,6 +107,6 @@ public static class PymcuCompiler
             dir = Directory.GetParent(dir)?.FullName;
         }
         throw new DirectoryNotFoundException(
-            "Cannot locate pymcu-rp2040 repo root (no hatch_build.py + examples/ found).");
+            "Cannot locate pymcu-arm repo root (no hatch_build.py + examples/ found).");
     }
 }

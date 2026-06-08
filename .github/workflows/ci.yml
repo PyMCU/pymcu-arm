@@ -18,16 +18,16 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - name: Checkout pymcu-rp2040
+      - name: Checkout pymcu-arm
         uses: actions/checkout@v4
         with:
-          path: pymcu-rp2040
+          path: pymcu-arm
 
       - name: Checkout pymcu monorepo
         uses: actions/checkout@v4
         with:
           repository: PyMCU/PyMCU
-          ref: development  # TODO: remove after PR #34 is merged to main
+          ref: main
           path: pymcu
           submodules: false
 
@@ -39,16 +39,16 @@ jobs:
       - name: Build pymcuc compiler
         shell: bash
         working-directory: pymcu
-        run: dotnet publish src/compiler/PyMCU.csproj -c Release -o ../pymcu-rp2040/build/bin --nologo
+        run: dotnet publish src/compiler/PyMCU.csproj -c Release -o ../pymcu-arm/build/bin --nologo
 
-      - name: Build pymcuc-rp2040 backend CLI
+      - name: Build pymcuc-arm backend CLI
         shell: bash
-        working-directory: pymcu-rp2040
-        run: dotnet publish src/csharp/cli/PyMCU.Backend.RP2040.Cli.csproj -c Release -o build/bin --nologo
+        working-directory: pymcu-arm
+        run: dotnet publish src/csharp/cli/PyMCU.Backend.ARM.Cli.csproj -c Release -o build/bin --nologo
 
   # ---------------------------------------------------------------------------
   # Full integration tests (RP2040 LLVM pipeline). Linux only — uses native
-  # LLVM tools downloaded by pymcu-rp2040-toolchain for the linux-x64 platform.
+  # LLVM tools downloaded by pymcu-arm-toolchain for the linux-x64 platform.
   # ---------------------------------------------------------------------------
   integration:
     name: Integration Tests (RP2040)
@@ -57,10 +57,10 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout pymcu-rp2040
+      - name: Checkout pymcu-arm
         uses: actions/checkout@v4
         with:
-          path: pymcu-rp2040
+          path: pymcu-arm
 
       # Checkout monorepo to build pymcuc (compiler binary).
       # TODO: replace with `pip install pymcu-compiler` once published to PyPI.
@@ -68,7 +68,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: PyMCU/PyMCU
-          ref: development  # TODO: remove after PR #34 is merged to main
+          ref: main
           path: pymcu
           submodules: recursive
 
@@ -91,51 +91,51 @@ jobs:
         working-directory: pymcu
         run: |
           dotnet publish src/compiler/PyMCU.csproj \
-            -c Release -o ../pymcu-rp2040/build/bin --nologo
+            -c Release -o ../pymcu-arm/build/bin --nologo
 
-      - name: Build pymcuc-rp2040 backend CLI
-        working-directory: pymcu-rp2040
+      - name: Build pymcuc-arm backend CLI
+        working-directory: pymcu-arm
         run: |
-          dotnet publish src/csharp/cli/PyMCU.Backend.RP2040.Cli.csproj \
+          dotnet publish src/csharp/cli/PyMCU.Backend.ARM.Cli.csproj \
             -c Release -o build/bin --nologo
 
       - name: Install Python dependencies
-        working-directory: pymcu-rp2040
+        working-directory: pymcu-arm
         run: |
           uv venv .venv
           uv pip install --python .venv pymcu-sdk
           uv pip install --python .venv -e ../pymcu/lib  # development stdlib
-          uv pip install --python .venv pymcu-rp2040-toolchain
+          uv pip install --python .venv pymcu-arm-toolchain
           uv pip install --python .venv -e ../pymcu
           uv pip install --python .venv -e . --no-deps
           uv pip install --python .venv -e ../pymcu/external/pymcu-micropython
           uv pip install --python .venv -e ../pymcu/external/pymcu-circuitpython
 
       - name: Configure environment
-        working-directory: pymcu-rp2040
+        working-directory: pymcu-arm
         run: |
-          echo "$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin" >> $GITHUB_PATH
-          echo "$GITHUB_WORKSPACE/pymcu-rp2040/build/bin" >> $GITHUB_PATH
-          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/pymcu-rp2040/.venv" >> $GITHUB_ENV
+          echo "$GITHUB_WORKSPACE/pymcu-arm/.venv/bin" >> $GITHUB_PATH
+          echo "$GITHUB_WORKSPACE/pymcu-arm/build/bin" >> $GITHUB_PATH
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/pymcu-arm/.venv" >> $GITHUB_ENV
 
-      - name: Pre-seed RP2040 toolchain cache
+      - name: Pre-seed ARM toolchain cache
         # get_tool() downloads 300+ MB from GitHub Releases on first call.
         # Run it here (outside the 120s test timeout) so the tools are cached
         # before the integration tests trigger them via Rp2040LlvmToolchain.
-        working-directory: pymcu-rp2040
+        working-directory: pymcu-arm
         run: |
-          "$GITHUB_WORKSPACE/pymcu-rp2040/.venv/bin/python3" -c "
-          import pymcu_rp2040_toolchain as tc
+          "$GITHUB_WORKSPACE/pymcu-arm/.venv/bin/python3" -c "
+          import pymcu_arm_toolchain as tc
           for name in tc.TOOLS:
               print(name, '->', tc.get_tool(name))
           "
 
       - name: Restore integration test packages
-        working-directory: pymcu-rp2040
+        working-directory: pymcu-arm
         run: dotnet restore tests/integration/PyMCU.IntegrationTests.csproj --nologo
 
       - name: Run integration tests
-        working-directory: pymcu-rp2040
+        working-directory: pymcu-arm
         run: |
           dotnet test tests/integration/PyMCU.IntegrationTests.csproj \
             --no-restore \
@@ -151,5 +151,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: integration-test-results
-          path: pymcu-rp2040/test-results/
+          path: pymcu-arm/test-results/
           retention-days: 15

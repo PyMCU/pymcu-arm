@@ -1,10 +1,10 @@
 # hatch_build.py
-# Custom hatchling build hook: compiles the pymcuc-rp2040 AOT binary and places
-# it at src/python/pymcu/backend/rp2040/pymcuc-rp2040 before wheel packaging.
+# Custom hatchling build hook: compiles the pymcuc-arm AOT binary and places
+# it at src/python/pymcu/backend/rp2040/pymcuc-arm before wheel packaging.
 #
 # Environment variables:
 #   PYMCU_SKIP_DOTNET_BUILD=1
-#       Skip dotnet publish and use an existing binary at build/bin/pymcuc-rp2040.
+#       Skip dotnet publish and use an existing binary at build/bin/pymcuc-arm.
 #       When no binary exists there (e.g. sdist-only builds), the hook returns
 #       early and produces a source-only package.
 #   DOTNET_RID
@@ -30,7 +30,7 @@ class CustomBuildHook(BuildHookInterface):
 
     def initialize(self, version: str, build_data: dict) -> None:
         root = Path(self.root)
-        binary_name = "pymcuc-rp2040.exe" if sys.platform == "win32" else "pymcuc-rp2040"
+        binary_name = "pymcuc-arm.exe" if sys.platform == "win32" else "pymcuc-arm"
 
         dst = root / "src" / "python" / "pymcu" / "backend" / "rp2040" / binary_name
         src = root / "build" / "bin" / binary_name
@@ -49,7 +49,7 @@ class CustomBuildHook(BuildHookInterface):
                 return
         else:
             csproj = (
-                root / "src" / "csharp" / "cli" / "PyMCU.Backend.RP2040.Cli.csproj"
+                root / "src" / "csharp" / "cli" / "PyMCU.Backend.ARM.Cli.csproj"
             )
             publish_dir = root / "build" / "bin"
             publish_dir.mkdir(parents=True, exist_ok=True)

@@ -28,8 +28,13 @@ jobs:
             os: windows-latest
 
     steps:
-      - name: Checkout pymcu-rp2040
+      # Both repos checked out as siblings so the relative csproj path
+      # ../../../../pymcu/extensions/pymcu-sdk/csharp/PyMCU.Backend.SDK.csproj
+      # resolves correctly from src/csharp/lib/ inside pymcu-arm/.
+      - name: Checkout pymcu-arm
         uses: actions/checkout@v4
+        with:
+          path: pymcu-arm
 
       - name: Checkout pymcu monorepo (SDK dependency)
         uses: actions/checkout@v4
@@ -39,16 +44,18 @@ jobs:
           path: pymcu
           sparse-checkout: |
             extensions/pymcu-sdk/csharp
+            global.json
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "10.x"
+          global-json-file: pymcu/global.json
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
 
       - name: Build wheel
+        working-directory: pymcu-arm
         env:
           DOTNET_RID: ${{ matrix.dotnet_rid }}
           WHEEL_PLATFORM_TAG: ${{ matrix.wheel_platform_tag }}
@@ -58,7 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.name }}
-          path: dist/*.whl
+          path: pymcu-arm/dist/*.whl
           retention-days: 15
 
   publish-pypi:
@@ -82,36 +89,3 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish dist/*
-
-  publish-gitea:
-    name: Publish to Gitea (private index)
-    needs: [build-wheels]
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: gitea
-    permissions:
-      contents: read
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Connect to Headscale network
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.HEADSCALE_AUTH_KEY }}
-          args: --login-server ${{ secrets.HEADSCALE_URL }}
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Publish to Gitea
-        run: |
-          uv publish \
-            --publish-url "${{ secrets.PRIVATE_PYPI_URL }}" \
-            --username "${{ secrets.PRIVATE_PYPI_USERNAME }}" \
-            --password "${{ secrets.PRIVATE_PYPI_TOKEN }}" \
-            dist/*

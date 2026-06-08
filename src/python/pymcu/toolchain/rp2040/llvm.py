@@ -45,12 +45,19 @@ TARGET_CPU = "cortex-m0plus"
 _REQUIRED_BINS = ["opt", "llc", "llvm-mc", "ld.lld", "llvm-objcopy"]
 
 # Extra directories to probe for LLVM binaries when they are not on PATH.
+# POSIX kegs first; Windows install locations are appended so a system LLVM
+# (the official installer or winget) is found without requiring it on PATH.
 _LLVM_SEARCH_DIRS = [
     "/opt/homebrew/opt/llvm/bin",          # macOS arm64 Homebrew keg
     "/usr/local/opt/llvm/bin",             # macOS x86_64 Homebrew keg
     "/usr/lib/llvm/bin",
     "/usr/bin",
 ]
+if sys.platform == "win32":
+    _LLVM_SEARCH_DIRS += [
+        r"C:\Program Files\LLVM\bin",
+        r"C:\Program Files (x86)\LLVM\bin",
+    ]
 
 
 class Rp2040LlvmToolchain(ExternalToolchain):
@@ -167,7 +174,13 @@ class Rp2040LlvmToolchain(ExternalToolchain):
 
     def _run(self, cmd: list[str]) -> None:
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            # encoding pinned to utf-8: LLVM tools emit utf-8 diagnostics, and
+            # text=True alone decodes with the locale codepage (cp1252 on
+            # Windows), which raises UnicodeDecodeError on non-ASCII output.
+            subprocess.run(
+                cmd, check=True, capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+            )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"RP2040 toolchain step failed: {' '.join(cmd)}\n{e.stderr}"

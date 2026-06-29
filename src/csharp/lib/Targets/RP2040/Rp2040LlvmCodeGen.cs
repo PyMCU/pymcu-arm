@@ -84,6 +84,12 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine($"@{Sym(g.Name)} = internal global {LlT(g.Type)} 0");
         if (program.Globals.Count > 0) _out.WriteLine();
 
+        // Named fixed-size arrays (ZCA instance backing stores, small buffers) as
+        // zero-initialised byte blobs in .bss; ArrayLoad/ArrayStore GEP into them.
+        foreach (var (arrName, byteSize) in program.GlobalArrays)
+            _out.WriteLine($"@{Sym(arrName)} = internal global [{byteSize} x i8] zeroinitializer");
+        if (program.GlobalArrays.Count > 0) _out.WriteLine();
+
         // Emit only functions reachable from a root (main / interrupt / exported).
         // PyMCU does not tree-shake unreachable non-inline functions, so an
         // imported module (e.g. pymcu.time) drops in sibling helpers written for
@@ -245,6 +251,10 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
             case LoadIndirect li:  CompileLoadIndirect(li); break;
             case StoreIndirect si: CompileStoreIndirect(si); break;
+            case ArrayLoad al:     CompileArrayLoad(al); break;
+            case ArrayStore ast:   CompileArrayStore(ast); break;
+            case BytearrayLoad bl:  CompileBytearrayLoad(bl); break;
+            case BytearrayStore bs: CompileBytearrayStore(bs); break;
 
             case Jump j:
                 _out.WriteLine($"  br label %{BlockLabel(j.Target)}");
@@ -292,6 +302,13 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                 string raw = Fresh();
                 _out.WriteLine($"  {raw} = load volatile {LlT(m.Type)}, ptr {p}");
                 return WidenToI32(raw, m.Type);
+            }
+            case ArrayBase ab:
+            {
+                // Base address of a named array as an integer (e.g. passed as a ptr).
+                string r = Fresh();
+                _out.WriteLine($"  {r} = ptrtoint ptr @{Sym(ab.ArrayName)} to i32");
+                return r;
             }
             case FunctionRef fr:
             {
@@ -520,6 +537,65 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine($"  store volatile {LlT(t)} {val}, ptr {p}");
     }
 
+    // ── Named arrays (ZCA instance backing stores, fixed buffers) ────────────
+    private string ArrayElemPtr(string arrayName, Val index, int elemSize)
+    {
+        string idx = LoadI32(index);
+        string byteOff;
+        if (elemSize == 1)
+            byteOff = idx;
+        else
+        {
+            byteOff = Fresh();
+            _out.WriteLine($"  {byteOff} = mul i32 {idx}, {elemSize}");
+        }
+        string p = Fresh();
+        _out.WriteLine($"  {p} = getelementptr inbounds i8, ptr @{Sym(arrayName)}, i32 {byteOff}");
+        return p;
+    }
+
+    private void CompileArrayLoad(ArrayLoad al)
+    {
+        string p = ArrayElemPtr(al.ArrayName, al.Index, al.ElemType.SizeOf());
+        string raw = Fresh();
+        _out.WriteLine($"  {raw} = load volatile {LlT(al.ElemType)}, ptr {p}");
+        StoreI32(WidenToI32(raw, al.ElemType), al.Dst);
+    }
+
+    private void CompileArrayStore(ArrayStore ast)
+    {
+        string val = NarrowFromI32(LoadI32(ast.Src), ast.ElemType);
+        string p = ArrayElemPtr(ast.ArrayName, ast.Index, ast.ElemType.SizeOf());
+        _out.WriteLine($"  store volatile {LlT(ast.ElemType)} {val}, ptr {p}");
+    }
+
+    // ── Bytearrays / ZCA instance fields (byte access through a held pointer) ──
+    private string BytearrayElemPtr(string ptrName, Val index)
+    {
+        string addr = LoadI32(new Variable(ptrName, DataType.UINT32));
+        string idx = LoadI32(index);
+        string basep = Fresh();
+        _out.WriteLine($"  {basep} = inttoptr i32 {addr} to ptr");
+        string p = Fresh();
+        _out.WriteLine($"  {p} = getelementptr inbounds i8, ptr {basep}, i32 {idx}");
+        return p;
+    }
+
+    private void CompileBytearrayLoad(BytearrayLoad bl)
+    {
+        string p = BytearrayElemPtr(bl.PtrName, bl.Index);
+        string raw = Fresh();
+        _out.WriteLine($"  {raw} = load volatile i8, ptr {p}");
+        StoreI32(WidenToI32(raw, DataType.UINT8), bl.Dst);
+    }
+
+    private void CompileBytearrayStore(BytearrayStore bs)
+    {
+        string val = NarrowFromI32(LoadI32(bs.Src), DataType.UINT8);
+        string p = BytearrayElemPtr(bs.PtrName, bs.Index);
+        _out.WriteLine($"  store volatile i8 {val}, ptr {p}");
+    }
+
     // ── Calls / return / control flow ────────────────────────────────────────
 
     private void CompileCall(Call call)
@@ -696,6 +772,10 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             case Bitcast bc: yield return bc.Src; yield return bc.Dst; break;
             case LoadIndirect li: yield return li.SrcPtr; yield return li.Dst; break;
             case StoreIndirect si: yield return si.Src; yield return si.DstPtr; break;
+            case ArrayLoad al: yield return al.Index; yield return al.Dst; break;
+            case ArrayStore ast: yield return ast.Index; yield return ast.Src; break;
+            case BytearrayLoad bl: yield return bl.Index; yield return bl.Dst; break;
+            case BytearrayStore bs: yield return bs.Index; yield return bs.Src; break;
             case JumpIfZero jz: yield return jz.Condition; break;
             case JumpIfNotZero jnz: yield return jnz.Condition; break;
             case JumpIfEqual je: yield return je.Src1; yield return je.Src2; break;

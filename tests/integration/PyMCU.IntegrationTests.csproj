@@ -12,6 +12,9 @@
     <ItemGroup>
         <!-- RP2040Sharp.TestKit is published on nuget.org -->
         <PackageReference Include="RP2040Sharp.TestKit" Version="1.0.0" />
+        <!-- RP2350.TestKit is not on nuget.org yet: reference the sibling repo locally.
+             Assumes RP2350Sharp is checked out beside pymcu-arm under the same parent. -->
+        <ProjectReference Include="../../../RP2350Sharp/src/RP2350.TestKit/RP2350.TestKit.csproj" />
     </ItemGroup>
 
     <ItemGroup>

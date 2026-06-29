@@ -33,6 +33,14 @@ public static class PymcuCompiler
         => BinCache.GetOrAdd("rp:fx:" + name,
             _ => new Lazy<byte[]>(() => CompileBin(Path.Combine(RepoRoot, "tests", "integration", "fixtures", name), name))).Value;
 
+    /// <summary>
+    /// Compiles the RP2350 example at <c>examples/{name}</c> and returns the flat
+    /// flash image (<c>dist/firmware.bin</c>) for RP2350TestSimulation.WithBinary.
+    /// </summary>
+    public static byte[] BuildRp2350(string name)
+        => BinCache.GetOrAdd("rp2350:ex:" + name,
+            _ => new Lazy<byte[]>(() => CompileBin(Path.Combine(RepoRoot, "examples", name), name))).Value;
+
     private static byte[] CompileBin(string projectDir, string name)
     {
         BuildGate.Wait();

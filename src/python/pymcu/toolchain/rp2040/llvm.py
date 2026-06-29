@@ -39,8 +39,21 @@ from typing import Optional
 from rich.console import Console
 from pymcu.toolchain.sdk import ExternalToolchain
 
+# Per-chip LLVM target: (triple, cpu). RP2350 is compiled soft-float (float is
+# unsupported in the backend anyway), so the same datalayout is valid for both.
+_TARGETS = {
+    "rp2040": ("thumbv6m-none-eabi", "cortex-m0plus"),
+    "rp2350": ("thumbv8m.main-none-eabi", "cortex-m33"),
+}
+
+# Default for arch aliases / unknown chips: behave as RP2040 (historical default).
 TARGET_TRIPLE = "thumbv6m-none-eabi"
 TARGET_CPU = "cortex-m0plus"
+
+
+def _resolve_target(chip: str) -> tuple[str, str]:
+    """Map a chip id to its (triple, cpu); default to RP2040."""
+    return _TARGETS.get((chip or "").lower(), (TARGET_TRIPLE, TARGET_CPU))
 
 _REQUIRED_BINS = ["opt", "llc", "llvm-mc", "ld.lld", "llvm-objcopy"]
 
@@ -63,7 +76,8 @@ if sys.platform == "win32":
 class Rp2040LlvmToolchain(ExternalToolchain):
     """LLVM-based toolchain for the RP2040 (ARM Cortex-M0+)."""
 
-    SUPPORTED = ("rp2040", "cortex-m0plus", "cortex-m0+", "cortex-m0", "arm")
+    SUPPORTED = ("rp2040", "cortex-m0plus", "cortex-m0+", "cortex-m0",
+                 "rp2350", "cortex-m33", "cortex-m33f", "arm")
 
     def __init__(self, console: Console, chip: str = "rp2040"):
         super().__init__(console, chip)
@@ -196,6 +210,9 @@ class Rp2040LlvmToolchain(ExternalToolchain):
         out_dir = ll_file.parent
         rt = self._runtime_dir()
 
+        triple, cpu = _resolve_target(self.chip)
+        is_rp2350 = (self.chip or "").lower() == "rp2350"
+
         opt = self._find_bin("opt")
         llc = self._find_bin("llc")
         mc = self._find_bin("llvm-mc")
@@ -204,24 +221,45 @@ class Rp2040LlvmToolchain(ExternalToolchain):
 
         opt_ll = out_dir / "firmware.opt.ll"
         fw_o = out_dir / "firmware.o"
-        boot2_o = out_dir / "boot2.o"
-        crt0_o = out_dir / "crt0.o"
         elf = out_dir / "firmware.elf"
         binimg = output_file or (out_dir / "firmware.bin")
 
         # 1. Mid-level optimization (mem2reg, instcombine, ...).
         self._run([opt, "-O2", "-S", str(ll_file), "-o", str(opt_ll)])
-        # 2. Compile IR -> Thumb object.
-        self._run([llc, f"-mtriple={TARGET_TRIPLE}", f"-mcpu={TARGET_CPU}",
-                   "-O2", "-filetype=obj", str(opt_ll), "-o", str(fw_o)])
-        # 3. Assemble the boot2 + crt0 runtime.
-        self._run([mc, f"-triple={TARGET_TRIPLE}", "-filetype=obj",
-                   str(rt / "boot2.S"), "-o", str(boot2_o)])
-        self._run([mc, f"-triple={TARGET_TRIPLE}", "-filetype=obj",
-                   str(rt / "crt0.S"), "-o", str(crt0_o)])
-        # 4. Link with the RP2040 layout (boot2 @0x000, vectors @0x100).
-        self._run([ld, "-T", str(rt / "rp2040.ld"),
-                   str(boot2_o), str(crt0_o), str(fw_o), "-o", str(elf)])
+
+        # 2. Compile IR -> Thumb object. RP2350 (M33) is built soft-float so the
+        #    FPU is never used and the calling convention matches the soft-float
+        #    datalayout the backend emits.
+        llc_cmd = [llc, f"-mtriple={triple}", f"-mcpu={cpu}",
+                   "-O2", "-filetype=obj"]
+        if is_rp2350:
+            llc_cmd += ["-float-abi=soft", "-mattr=-fpregs"]
+        llc_cmd += [str(opt_ll), "-o", str(fw_o)]
+        self._run(llc_cmd)
+
+        # 3. Assemble the runtime + link with the per-chip layout.
+        if is_rp2350:
+            # RP2350: no boot2/CRC stub. The BootROM scans for a picobin
+            # IMAGE_DEF block and boots the vector table at flash offset 0.
+            crt0_o = out_dir / "crt0.o"
+            picobin_o = out_dir / "picobin.o"
+            self._run([mc, f"-triple={triple}", "-filetype=obj",
+                       str(rt / "crt0_m33.S"), "-o", str(crt0_o)])
+            self._run([mc, f"-triple={triple}", "-filetype=obj",
+                       str(rt / "picobin_rp2350.S"), "-o", str(picobin_o)])
+            self._run([ld, "-T", str(rt / "rp2350.ld"),
+                       str(crt0_o), str(picobin_o), str(fw_o), "-o", str(elf)])
+        else:
+            # RP2040: boot2 @0x000, vectors @0x100.
+            boot2_o = out_dir / "boot2.o"
+            crt0_o = out_dir / "crt0.o"
+            self._run([mc, f"-triple={triple}", "-filetype=obj",
+                       str(rt / "boot2.S"), "-o", str(boot2_o)])
+            self._run([mc, f"-triple={triple}", "-filetype=obj",
+                       str(rt / "crt0.S"), "-o", str(crt0_o)])
+            self._run([ld, "-T", str(rt / "rp2040.ld"),
+                       str(boot2_o), str(crt0_o), str(fw_o), "-o", str(elf)])
+
         # 5. Flatten to a raw flash image.
         self._run([objcopy, "-O", "binary", str(elf), str(binimg)])
         return Path(binimg)

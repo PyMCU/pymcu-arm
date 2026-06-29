@@ -26,10 +26,35 @@ namespace PyMCU.Backend.Targets.RP2040;
 
 public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 {
-    private const string TargetTriple = "thumbv6m-none-eabi";
+    // Per-target LLVM triple + cpu. The codegen is otherwise chip-agnostic: only
+    // these two strings change per Cortex-M target. RP2350 is compiled soft-float
+    // (float is unsupported anyway), so the datalayout below is valid for both.
+    private static readonly Dictionary<string, (string Triple, string Cpu)> Targets =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["rp2040"]       = ("thumbv6m-none-eabi", "cortex-m0plus"),
+            ["cortex-m0plus"] = ("thumbv6m-none-eabi", "cortex-m0plus"),
+            ["rp2350"]       = ("thumbv8m.main-none-eabi", "cortex-m33"),
+            ["cortex-m33"]   = ("thumbv8m.main-none-eabi", "cortex-m33"),
+        };
+
     private const string DataLayout   = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64";
 
     private readonly DeviceConfig _cfg = cfg;
+
+    // Resolve the LLVM triple for this device: prefer the concrete chip, fall
+    // back to the arch, then default to RP2040 (Cortex-M0+) to preserve the
+    // historical behaviour when neither is recognised.
+    private string TargetTriple => ResolveTarget().Triple;
+
+    private (string Triple, string Cpu) ResolveTarget()
+    {
+        if (!string.IsNullOrEmpty(_cfg.TargetChip) && Targets.TryGetValue(_cfg.TargetChip, out var byChip))
+            return byChip;
+        if (!string.IsNullOrEmpty(_cfg.Arch) && Targets.TryGetValue(_cfg.Arch, out var byArch))
+            return byArch;
+        return Targets["rp2040"];
+    }
 
     private TextWriter _out = TextWriter.Null;
     private int _ssa;                                   // fresh SSA / block counter
@@ -38,10 +63,12 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     private Dictionary<string, List<DataType>> _paramTypes = new();  // func -> param types
     private Dictionary<string, DataType> _returnTypes = new();       // func -> return type
     private Dictionary<string, DataType> _slots = new();            // current func: var/tmp -> type
+    private HashSet<string> _nakedFns = new();                      // @naked function names (never tail-call)
 
     public override void Compile(ProgramIR program, TextWriter output)
     {
         _out = output;
+        _nakedFns = new HashSet<string>(program.Functions.Where(f => f.IsNaked).Select(f => f.Name));
         EmitModulePreamble();
 
         // Precompute signatures (param + return types) for call lowering.
@@ -68,6 +95,20 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             if (func.IsInline) continue;   // inlined at call sites; never emitted standalone
             if (!reachable.Contains(func.Name)) continue;
             CompileFunction(func);
+        }
+
+        // @export_c functions may have no visible IR caller (they are reached only from
+        // inline asm, e.g. an RTOS `asm("bl scheduler")`). Anchor them in @llvm.used so
+        // the optimizer's globaldce/internalize pass keeps the symbol in the object.
+        var exported = program.Functions
+            .Where(f => f.IsExportC && !f.IsInline && reachable.Contains(f.Name))
+            .ToList();
+        if (exported.Count > 0)
+        {
+            string elems = string.Join(", ", exported.Select(f => $"ptr @{EmitSym(f)}"));
+            _out.WriteLine();
+            _out.WriteLine($"@llvm.used = appending global [{exported.Count} x ptr] " +
+                           $"[{elems}], section \"llvm.metadata\"");
         }
     }
 
@@ -108,7 +149,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     private void EmitModulePreamble()
     {
-        _out.WriteLine("; PyMCU RP2040 backend - generated LLVM IR");
+        _out.WriteLine("; PyMCU ARM (Cortex-M) backend - generated LLVM IR");
         _out.WriteLine($"; target chip: {_cfg.TargetChip}  freq: {_cfg.Frequency} Hz");
         _out.WriteLine($"target datalayout = \"{DataLayout}\"");
         _out.WriteLine($"target triple = \"{TargetTriple}\"");
@@ -125,38 +166,45 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
         // Signature.
         var sig = new StringBuilder();
-        sig.Append($"define {LlT(func.ReturnType)} @{Sym(func.Name)}(");
+        sig.Append($"define {LlT(func.ReturnType)} @{EmitSym(func)}(");
         for (int i = 0; i < func.Params.Count; i++)
         {
             if (i > 0) sig.Append(", ");
             sig.Append($"{LlT(paramTypes[i])} %arg.{Sym(func.Params[i])}");
         }
-        sig.Append(") {");
+        // A @naked function gets full control: LLVM emits no prologue/epilogue and
+        // touches no registers around the body, so the inline asm owns the frame
+        // (essential for an RTOS context switch). The asm itself returns (bx lr /
+        // exception return), so the block ends with `unreachable`.
+        sig.Append(func.IsNaked ? ") naked noinline {" : ") {");
         _out.WriteLine();
         _out.WriteLine(sig.ToString());
 
-        // Entry block: allocas for every local slot, then store incoming params.
         _out.WriteLine("entry:");
-        foreach (var (name, type) in _slots)
-            if (!_globals.Contains(name))
-                _out.WriteLine($"  %{SlotReg(name)} = alloca {LlT(type)}");
-        for (int i = 0; i < func.Params.Count; i++)
+        if (!func.IsNaked)
         {
-            string p = func.Params[i];
-            var t = paramTypes[i];
-            _out.WriteLine($"  store {LlT(t)} %arg.{Sym(p)}, ptr %{SlotReg(p)}");
+            // Allocas for every local slot, then store incoming params.
+            foreach (var (name, type) in _slots)
+                if (!_globals.Contains(name))
+                    _out.WriteLine($"  %{SlotReg(name)} = alloca {LlT(type)}");
+            for (int i = 0; i < func.Params.Count; i++)
+            {
+                string p = func.Params[i];
+                var t = paramTypes[i];
+                _out.WriteLine($"  store {LlT(t)} %arg.{Sym(p)}, ptr %{SlotReg(p)}");
+            }
+            _out.WriteLine("  br label %body");
+            _out.WriteLine("body:");
         }
-        _out.WriteLine("  br label %body");
-        _out.WriteLine("body:");
         _blockOpen = true;
 
         foreach (var instr in func.Body)
             CompileInstruction(instr, func);
 
-        // Implicit return for a fall-through end of a void function.
         if (_blockOpen)
         {
-            if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
+            if (func.IsNaked) _out.WriteLine("  unreachable");
+            else if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
             else _out.WriteLine($"  ret {LlT(func.ReturnType)} 0");
         }
         _out.WriteLine("}");
@@ -244,6 +292,17 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                 string raw = Fresh();
                 _out.WriteLine($"  {raw} = load volatile {LlT(m.Type)}, ptr {p}");
                 return WidenToI32(raw, m.Type);
+            }
+            case FunctionRef fr:
+            {
+                // Address of a function as an integer, with the Thumb bit set (bit 0)
+                // so it is a valid Cortex-M call/branch target -- e.g. a task entry
+                // written into a context-switch stack frame's PC slot.
+                string pi = Fresh();
+                _out.WriteLine($"  {pi} = ptrtoint ptr @{Sym(fr.FunctionName)} to i32");
+                string thumb = Fresh();
+                _out.WriteLine($"  {thumb} = or i32 {pi}, 1");
+                return thumb;
             }
             default:
                 throw new NotSupportedException(
@@ -435,23 +494,30 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     private void CompileLoadIndirect(LoadIndirect li)
     {
-        DataType t = ValType(li.Dst);
+        // Access width is the pointer's element type when known (li.Elem); fall
+        // back to the destination's type for legacy IR that left it UINT8.
+        DataType t = li.Elem != DataType.UINT8 ? li.Elem : ValType(li.Dst);
         string addr = LoadI32(li.SrcPtr);
         string p = Fresh();
         _out.WriteLine($"  {p} = inttoptr i32 {addr} to ptr");
         string raw = Fresh();
-        _out.WriteLine($"  {raw} = load {LlT(t)}, ptr {p}");
+        // VOLATILE: a ptr access targets MMIO or shared state -- the optimizer must
+        // not cache, reorder or eliminate it (else e.g. an RTOS queue index read
+        // back after a write keeps a stale value).
+        _out.WriteLine($"  {raw} = load volatile {LlT(t)}, ptr {p}");
         StoreI32(WidenToI32(raw, t), li.Dst);
     }
 
     private void CompileStoreIndirect(StoreIndirect si)
     {
-        DataType t = ValType(si.Src);
+        // Access width is the pointer's element type when known (si.Elem); fall
+        // back to the source value's type for legacy IR that left it UINT8.
+        DataType t = si.Elem != DataType.UINT8 ? si.Elem : ValType(si.Src);
         string val = NarrowFromI32(LoadI32(si.Src), t);
         string addr = LoadI32(si.DstPtr);
         string p = Fresh();
         _out.WriteLine($"  {p} = inttoptr i32 {addr} to ptr");
-        _out.WriteLine($"  store {LlT(t)} {val}, ptr {p}");
+        _out.WriteLine($"  store volatile {LlT(t)} {val}, ptr {p}");
     }
 
     // ── Calls / return / control flow ────────────────────────────────────────
@@ -471,14 +537,21 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         }
         string argList = string.Join(", ", args);
 
+        // A @naked function returns via `bx lr`. If the optimizer tail-calls it
+        // (`b` instead of `bl`), LR is never set to the post-call address -- and when
+        // such a function pends a context switch (RTOS yield), the task resumes with a
+        // STALE LR and re-executes the caller's prior code. Force a real call (`bl`)
+        // by marking the call `notail`.
+        string tailMod = _nakedFns.Contains(callee) ? "notail " : "";
+
         if (ret == DataType.VOID)
         {
-            _out.WriteLine($"  call void @{Sym(callee)}({argList})");
+            _out.WriteLine($"  {tailMod}call void @{Sym(callee)}({argList})");
         }
         else
         {
             string r = Fresh();
-            _out.WriteLine($"  {r} = call {LlT(ret)} @{Sym(callee)}({argList})");
+            _out.WriteLine($"  {r} = {tailMod}call {LlT(ret)} @{Sym(callee)}({argList})");
             if (call.Dst is not NoneVal)
                 StoreI32(WidenToI32(r, ret), call.Dst);
         }
@@ -663,6 +736,13 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     private static string SlotReg(string name) => "v." + Sym(name);
 
     // Sanitize an IR symbol into a valid LLVM identifier body.
+    // Emitted symbol name. @export_c/@used functions keep their ORIGINAL (unmangled)
+    // name so inline asm and external C can reach them by their source name --
+    // `asm("bl _schedule")` resolves even when the function lives in a module whose
+    // calls would otherwise be prefixed (e.g. freertos__schedule).
+    private static string EmitSym(Function f) =>
+        Sym(f.IsExportC && !string.IsNullOrEmpty(f.OriginalName) ? f.OriginalName! : f.Name);
+
     private static string Sym(string name)
     {
         var sb = new StringBuilder(name.Length);

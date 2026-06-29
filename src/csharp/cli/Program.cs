@@ -121,7 +121,7 @@ rootCmd.SetAction(pr =>
     var cfg = new DeviceConfig
     {
         TargetChip      = target,
-        Arch            = "rp2040",
+        Arch            = string.IsNullOrEmpty(target) ? "rp2040" : target.ToLowerInvariant(),
         Frequency       = freq,
         ResetVector     = resetVec,
         InterruptVector = intVec,

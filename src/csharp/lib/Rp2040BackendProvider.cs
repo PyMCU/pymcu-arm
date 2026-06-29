@@ -18,7 +18,8 @@ public sealed class Rp2040BackendProvider : IBackendProvider
     public string Version => "0.1.0-alpha.1";
 
     private static readonly string[] SupportedArches =
-        ["rp2040", "cortex-m0plus", "cortex-m0+", "cortex-m0", "arm"];
+        ["rp2040", "cortex-m0plus", "cortex-m0+", "cortex-m0",
+         "rp2350", "cortex-m33", "cortex-m33f", "arm"];
 
     public bool Supports(string arch)
     {

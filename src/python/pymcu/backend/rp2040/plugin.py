@@ -34,7 +34,8 @@ class Rp2040BackendPlugin(BackendPlugin):
     family = "rp2040"
     description = "RP2040 codegen backend (Cortex-M0+, LLVM IR output)"
     version = "0.1.0a1"
-    supported_arches = ["rp2040", "cortex-m0plus", "cortex-m0+", "cortex-m0", "arm"]
+    supported_arches = ["rp2040", "cortex-m0plus", "cortex-m0+", "cortex-m0",
+                        "rp2350", "cortex-m33", "cortex-m33f", "arm"]
 
     @classmethod
     def get_backend_binary(cls) -> Path:

@@ -90,6 +90,35 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine($"@{Sym(arrName)} = internal global [{byteSize} x i8] zeroinitializer");
         if (program.GlobalArrays.Count > 0) _out.WriteLine();
 
+        // The frontend only registers ENTRY-module top-level arrays in GlobalArrays.
+        // Function-local fixed arrays and imported-module arrays are still referenced by
+        // ArrayStore/ArrayLoad (which carry the element type + Count). PyMCU's static
+        // model has no stack/heap arrays, so statically allocate a global for every
+        // referenced array that isn't already declared, sized from the instruction.
+        var extraArrays = new Dictionary<string, int>();
+        foreach (var func in program.Functions)
+            foreach (var instr in func.Body)
+            {
+                string? an = instr switch
+                {
+                    ArrayStore ast => ast.ArrayName,
+                    ArrayLoad al => al.ArrayName,
+                    _ => null,
+                };
+                if (an == null || program.GlobalArrays.ContainsKey(an) || _globals.Contains(an))
+                    continue;
+                int bytes = instr switch
+                {
+                    ArrayStore ast => ast.Count * ast.ElemType.SizeOf(),
+                    ArrayLoad al => al.Count * al.ElemType.SizeOf(),
+                    _ => 0,
+                };
+                if (!extraArrays.TryGetValue(an, out int cur) || bytes > cur) extraArrays[an] = bytes;
+            }
+        foreach (var (arrName, byteSize) in extraArrays)
+            _out.WriteLine($"@{Sym(arrName)} = internal global [{byteSize} x i8] zeroinitializer");
+        if (extraArrays.Count > 0) _out.WriteLine();
+
         // Emit only functions reachable from a root (main / interrupt / exported).
         // PyMCU does not tree-shake unreachable non-inline functions, so an
         // imported module (e.g. pymcu.time) drops in sibling helpers written for

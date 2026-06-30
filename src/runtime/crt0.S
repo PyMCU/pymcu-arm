@@ -84,3 +84,58 @@ Reset_Handler:
 Default_Handler:
     b    Default_Handler
     .size Default_Handler, . - Default_Handler
+
+/* ---- Integer division (Cortex-M0+ has no hardware divide instruction) ----
+ * LLVM lowers `/` and `%` to __aeabi_uidiv/__aeabi_uidivmod (and the signed
+ * variants). libgcc/compiler-rt is not linked, so provide them here, routed to
+ * the RP2040 SIO hardware divider (8-cycle, base 0xD0000000):
+ *   UDIVIDEND +0x60  UDIVISOR +0x64  SDIVIDEND +0x68  SDIVISOR +0x6C
+ *   QUOTIENT  +0x70  REMAINDER +0x74
+ * NOTE: not IRQ-safe (the divider state is shared); a future revision should
+ * save/restore it in the context switch, as the pico-sdk does.
+ */
+    .section .text.__aeabi_div, "ax", %progbits
+    .align 2
+    .global __aeabi_uidiv
+    .global __aeabi_uidivmod
+    .thumb_func
+__aeabi_uidiv:
+    .thumb_func
+__aeabi_uidivmod:
+    ldr  r2, =0xd0000000
+    str  r0, [r2, #0x60]        @ DIV_UDIVIDEND
+    str  r1, [r2, #0x64]        @ DIV_UDIVISOR
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    ldr  r1, [r2, #0x74]        @ DIV_REMAINDER (read first)
+    ldr  r0, [r2, #0x70]        @ DIV_QUOTIENT
+    bx   lr
+
+    .align 2
+    .global __aeabi_idiv
+    .global __aeabi_idivmod
+    .thumb_func
+__aeabi_idiv:
+    .thumb_func
+__aeabi_idivmod:
+    ldr  r2, =0xd0000000
+    str  r0, [r2, #0x68]        @ DIV_SDIVIDEND
+    str  r1, [r2, #0x6c]        @ DIV_SDIVISOR
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    ldr  r1, [r2, #0x74]        @ DIV_REMAINDER
+    ldr  r0, [r2, #0x70]        @ DIV_QUOTIENT
+    bx   lr
+    .ltorg

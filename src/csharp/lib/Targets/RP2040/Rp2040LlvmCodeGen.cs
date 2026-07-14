@@ -119,6 +119,23 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine($"@{Sym(arrName)} = internal global [{byteSize} x i8] zeroinitializer");
         if (extraArrays.Count > 0) _out.WriteLine();
 
+        // Flash-resident constant byte tables (interned strings, const[uint8[N]] lookup
+        // tables). On AVR these live in PROGMEM read via LPM; on ARM flash is memory-mapped,
+        // so they are plain `.rodata` constants and ArrayLoadFlash is an ordinary GEP+load.
+        // Label convention matches AVR + the frontend: "__flash_" + name('.'->'_').
+        var flashData = new Dictionary<string, List<int>>();
+        foreach (var func in program.Functions)
+            foreach (var instr in func.Body)
+                if (instr is FlashData fd) flashData[fd.Name] = fd.Bytes;
+        foreach (var (name, bytes) in flashData)
+        {
+            var sb = new StringBuilder(bytes.Count * 3);
+            foreach (var b in bytes) sb.Append('\\').Append((b & 0xFF).ToString("X2"));
+            _out.WriteLine($"@{Sym("__flash_" + name.Replace('.', '_'))} = " +
+                           $"private constant [{bytes.Count} x i8] c\"{sb}\"");
+        }
+        if (flashData.Count > 0) _out.WriteLine();
+
         // Emit only functions reachable from a root (main / interrupt / exported).
         // PyMCU does not tree-shake unreachable non-inline functions, so an
         // imported module (e.g. pymcu.time) drops in sibling helpers written for
@@ -282,6 +299,9 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             case StoreIndirect si: CompileStoreIndirect(si); break;
             case ArrayLoad al:     CompileArrayLoad(al); break;
             case ArrayStore ast:   CompileArrayStore(ast); break;
+            case ArrayLoadFlash alf: CompileArrayLoadFlash(alf); break;
+            case FlashData:        break;  // emitted as a .rodata constant in the preamble
+            case FlashLoadPtr flp: CompileFlashLoadPtr(flp); break;
             case BytearrayLoad bl:  CompileBytearrayLoad(bl); break;
             case BytearrayStore bs: CompileBytearrayStore(bs); break;
 
@@ -331,6 +351,14 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                 string raw = Fresh();
                 _out.WriteLine($"  {raw} = load volatile {LlT(m.Type)}, ptr {p}");
                 return WidenToI32(raw, m.Type);
+            }
+            case FlashStrAddr fsa:
+            {
+                // Address of a flash-resident interned string as an integer (flash is
+                // memory-mapped on ARM, so this is just the .rodata constant's address).
+                string fp = Fresh();
+                _out.WriteLine($"  {fp} = ptrtoint ptr @{Sym("__flash_" + fsa.Name.Replace('.', '_'))} to i32");
+                return fp;
             }
             case ArrayBase ab:
             {
@@ -596,6 +624,35 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         string val = NarrowFromI32(LoadI32(ast.Src), ast.ElemType);
         string p = ArrayElemPtr(ast.ArrayName, ast.Index, ast.ElemType.SizeOf());
         _out.WriteLine($"  store volatile {LlT(ast.ElemType)} {val}, ptr {p}");
+    }
+
+    // Load one byte from a flash-resident const table (interned string / const[uint8[N]]).
+    // On ARM the table is a .rodata constant (emitted in the preamble), so this is a plain
+    // GEP + load -- no LPM/special addressing as on AVR.
+    private void CompileArrayLoadFlash(ArrayLoadFlash alf)
+    {
+        string label = Sym("__flash_" + alf.ArrayName.Replace('.', '_'));
+        string idx = LoadI32(alf.Index);
+        string p = Fresh();
+        _out.WriteLine($"  {p} = getelementptr inbounds i8, ptr @{label}, i32 {idx}");
+        string raw = Fresh();
+        _out.WriteLine($"  {raw} = load i8, ptr {p}");
+        StoreI32(WidenToI32(raw, DataType.UINT8), alf.Dst);
+    }
+
+    // Load one byte via a flash pointer (FlashStrAddr) at an index -- same as above but the
+    // base is a runtime pointer value rather than a named table.
+    private void CompileFlashLoadPtr(FlashLoadPtr flp)
+    {
+        string basep = LoadI32(flp.Ptr);
+        string idx = LoadI32(flp.Index);
+        string bp = Fresh();
+        _out.WriteLine($"  {bp} = inttoptr i32 {basep} to ptr");
+        string p = Fresh();
+        _out.WriteLine($"  {p} = getelementptr inbounds i8, ptr {bp}, i32 {idx}");
+        string raw = Fresh();
+        _out.WriteLine($"  {raw} = load i8, ptr {p}");
+        StoreI32(WidenToI32(raw, DataType.UINT8), flp.Dst);
     }
 
     // ── Bytearrays / ZCA instance fields (byte access through a held pointer) ──

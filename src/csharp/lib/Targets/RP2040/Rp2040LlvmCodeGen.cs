@@ -64,6 +64,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     private Dictionary<string, DataType> _returnTypes = new();       // func -> return type
     private Dictionary<string, DataType> _slots = new();            // current func: var/tmp -> type
     private HashSet<string> _nakedFns = new();                      // @naked function names (never tail-call)
+    private bool _exnEnabled;                                       // program uses the exception model
 
     public override void Compile(ProgramIR program, TextWriter output)
     {
@@ -135,6 +136,38 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                            $"private constant [{bytes.Count} x i8] c\"{sb}\"");
         }
         if (flashData.Count > 0) _out.WriteLine();
+
+        // Exception model (portable T-flag): AVR carries the error in SREG's T bit + R22.
+        // LLVM has no reserved flag/register, so a pair of internal globals mirrors them:
+        // flag = "an error is propagating", code = the exception payload. Volatile accesses
+        // keep the raise/check protocol exact (consistent with this backend's bare-metal
+        // pointer semantics). NOT ISR-safe: an ISR that calls a CanFail function between a
+        // callee's store and the caller's check could clobber a pending error (AVR is safe
+        // there because the ISR prologue saves SREG); CanFailAnalyzer already forbids
+        // CanFail ISRs themselves.
+        _exnEnabled = program.Functions.Any(f =>
+            f.Body.Any(i => i is SignalError or SignalSuccess or BranchOnError));
+        if (_exnEnabled)
+        {
+            _out.WriteLine("@__pymcu_exn_flag = internal global i8 0");
+            _out.WriteLine("@__pymcu_exn_code = internal global i8 0");
+            _out.WriteLine();
+
+            // The unhandled-exception runtime (prints E:<Name> over UART0, then halts) is
+            // emitted only when something actually targets it (same criterion as AVR).
+            bool needsRuntime = program.Functions.Any(f =>
+                f.Body.OfType<Call>().Any(c => c.FunctionName == "__pymcu_unhandled_exn")
+                || f.Body.OfType<BranchOnError>().Any(b => b.ErrorLabel == "__pymcu_unhandled_exn"));
+            if (needsRuntime)
+            {
+                var usedCodes = new SortedSet<int>();
+                foreach (var f in program.Functions)
+                    foreach (var se in f.Body.OfType<SignalError>())
+                        if (se.Code is Constant ce && ce.Value != 0)
+                            usedCodes.Add(ce.Value);
+                EmitExnRuntime(usedCodes);
+            }
+        }
 
         // Emit only functions reachable from a root (main / interrupt / exported).
         // PyMCU does not tree-shake unreachable non-inline functions, so an
@@ -256,8 +289,14 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         if (_blockOpen)
         {
             if (func.IsNaked) _out.WriteLine("  unreachable");
-            else if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
-            else _out.WriteLine($"  ret {LlT(func.ReturnType)} 0");
+            else
+            {
+                // Implicit fall-off-the-end return: same happy-path flag clear as CompileReturn.
+                if (_exnEnabled && func.CanFail && !func.IsInterrupt)
+                    _out.WriteLine("  store volatile i8 0, ptr @__pymcu_exn_flag");
+                if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
+                else _out.WriteLine($"  ret {LlT(func.ReturnType)} 0");
+            }
         }
         _out.WriteLine("}");
     }
@@ -324,6 +363,10 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             case Call call:     CompileCall(call); break;
             case Return r:      CompileReturn(r, func); break;
 
+            case SignalError se:    CompileSignalError(se, func); break;
+            case SignalSuccess:     CompileSignalSuccess(); break;
+            case BranchOnError boe: CompileBranchOnError(boe); break;
+
             case InlineAsm ia:  CompileInlineAsm(ia); break;
 
             default:
@@ -342,6 +385,14 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         {
             case Constant c:   return c.Value.ToString();
             case NoneVal:      return "0";
+            // "__exn_r22_capture" is the catch-dispatcher's read-only alias for the error
+            // payload (physical R22 on AVR). Here the payload lives in @__pymcu_exn_code.
+            case Variable { Name: "__exn_r22_capture" }:
+            {
+                string ec = Fresh();
+                _out.WriteLine($"  {ec} = load volatile i8, ptr @__pymcu_exn_code");
+                return WidenToI32(ec, DataType.UINT8);
+            }
             case Variable var: return WidenToI32(EmitLoad(SlotPtr(var.Name), var.Type), var.Type);
             case Temporary t:  return WidenToI32(EmitLoad(SlotPtr(t.Name), t.Type), t.Type);
             case MemoryAddress m:
@@ -721,6 +772,12 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     private void CompileReturn(Return r, Function func)
     {
+        // Every CanFail function clears the pending-error flag on its happy path (the
+        // AVR backend's CLT-before-RET); SignalError bypasses this by emitting its own
+        // ret so the flag stays set on the error path. ISRs are excluded (can't be
+        // CanFail, and must not clobber a main-context pending error).
+        if (_exnEnabled && func.CanFail && !func.IsInterrupt)
+            _out.WriteLine("  store volatile i8 0, ptr @__pymcu_exn_flag");
         if (func.ReturnType == DataType.VOID || r.Value is NoneVal)
         {
             _out.WriteLine("  ret void");
@@ -731,6 +788,141 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine($"  ret {LlT(func.ReturnType)} {v}");
         }
         _blockOpen = false;
+    }
+
+    // ── Exceptions (portable T-flag model over @__pymcu_exn_flag/_code) ─────────
+
+    // SignalError — deliver an error. Code Constant{0} means "keep the current payload"
+    // (a re-raise). With a CatchLabel the raise is caught in this same function: jump to
+    // the local dispatcher WITHOUT touching the flag. Without one, set the flag and
+    // return immediately (bypassing CompileReturn's happy-path clear) so the caller's
+    // BranchOnError guard sees the error.
+    private void CompileSignalError(SignalError se, Function func)
+    {
+        if (se.Code is not Constant { Value: 0 })
+        {
+            string code = NarrowFromI32(LoadI32(se.Code), DataType.UINT8);
+            _out.WriteLine($"  store volatile i8 {code}, ptr @__pymcu_exn_code");
+        }
+        if (se.CatchLabel != null)
+        {
+            _out.WriteLine($"  br label %{BlockLabel(se.CatchLabel)}");
+            _blockOpen = false;
+            return;
+        }
+        _out.WriteLine("  store volatile i8 1, ptr @__pymcu_exn_flag");
+        if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
+        else _out.WriteLine($"  ret {LlT(func.ReturnType)} 0");
+        _blockOpen = false;
+    }
+
+    // SignalSuccess — happy path: clear the pending-error flag.
+    private void CompileSignalSuccess()
+        => _out.WriteLine("  store volatile i8 0, ptr @__pymcu_exn_flag");
+
+    // BranchOnError — after a call to a CanFail function, branch if an error is pending.
+    // "__pymcu_unhandled_exn" is a cross-function target (the halt runtime), which LLVM
+    // cannot `br` to: lower that case as a guarded call + unreachable instead.
+    private void CompileBranchOnError(BranchOnError boe)
+    {
+        string f = Fresh();
+        _out.WriteLine($"  {f} = load volatile i8, ptr @__pymcu_exn_flag");
+        string c = Fresh();
+        _out.WriteLine($"  {c} = icmp ne i8 {f}, 0");
+        if (boe.ErrorLabel == "__pymcu_unhandled_exn")
+        {
+            string trap = $"exn.{_ssa++}";
+            string cont = $"ft.{_ssa++}";
+            _out.WriteLine($"  br i1 {c}, label %{trap}, label %{cont}");
+            _out.WriteLine($"{trap}:");
+            _out.WriteLine("  call void @__pymcu_unhandled_exn()");
+            _out.WriteLine("  unreachable");
+            _out.WriteLine($"{cont}:");
+            _blockOpen = true;
+        }
+        else CondJump(c, boe.ErrorLabel);
+    }
+
+    private static string ExnCodeName(int code) => code switch
+    {
+        1 => "ValueError",
+        2 => "TypeError",
+        3 => "IndexError",
+        4 => "KeyError",
+        5 => "NotImplementedError",
+        _ => $"Exception{code}"
+    };
+
+    // The unhandled-exception runtime: if UART0 is enabled, print "E:<Name>\r\n" for the
+    // pending code, then halt in a tight loop (the asm sideeffect keeps LLVM from folding
+    // the intentionally-infinite loop away). Mirrors the AVR EmitExnRuntime contract.
+    private void EmitExnRuntime(IReadOnlyCollection<int> codes)
+    {
+        bool isM33 = ResolveTarget().Cpu == "cortex-m33";
+        uint uartBase = isM33 ? 0x40070000u : 0x40034000u;   // rp2350 : rp2040 UART0
+        uint dr = uartBase + 0x00, fr = uartBase + 0x18, cr = uartBase + 0x30;
+
+        foreach (int code in codes)
+        {
+            string name = ExnCodeName(code);
+            var sb = new StringBuilder();
+            sb.Append("E:");
+            sb.Append(name);
+            var bytes = sb.ToString().Select(ch => (int)ch).Concat(new[] { 13, 10, 0 }).ToList();
+            var enc = new StringBuilder(bytes.Count * 3);
+            foreach (var b in bytes) enc.Append('\\').Append(b.ToString("X2"));
+            _out.WriteLine($"@__exn_str_{code} = private constant [{bytes.Count} x i8] c\"{enc}\"");
+        }
+        _out.WriteLine();
+        _out.WriteLine("define internal void @__pymcu_unhandled_exn() noreturn {");
+        _out.WriteLine("entry:");
+        // UART0 not enabled -> nothing to print, just halt (AVR checks TXEN the same way).
+        _out.WriteLine($"  %cr = load volatile i32, ptr inttoptr (i32 {cr} to ptr)");
+        _out.WriteLine("  %uarten = and i32 %cr, 1");
+        _out.WriteLine("  %off = icmp eq i32 %uarten, 0");
+        if (codes.Count == 0)
+        {
+            _out.WriteLine("  br label %halt");
+        }
+        else
+        {
+            _out.WriteLine("  br i1 %off, label %halt, label %dispatch");
+            _out.WriteLine("dispatch:");
+            _out.WriteLine("  %code = load volatile i8, ptr @__pymcu_exn_code");
+            _out.WriteLine("  switch i8 %code, label %halt [");
+            foreach (int code in codes)
+                _out.WriteLine($"    i8 {code}, label %case.{code}");
+            _out.WriteLine("  ]");
+            foreach (int code in codes)
+            {
+                _out.WriteLine($"case.{code}:");
+                _out.WriteLine("  br label %print");
+            }
+            _out.WriteLine("print:");
+            string phi = string.Join(", ", codes.Select(cd => $"[ @__exn_str_{cd}, %case.{cd} ]"));
+            _out.WriteLine($"  %s = phi ptr {phi}");
+            _out.WriteLine("  br label %loop");
+            _out.WriteLine("loop:");
+            _out.WriteLine("  %p = phi ptr [ %s, %print ], [ %pn, %putc ]");
+            _out.WriteLine("  %ch = load i8, ptr %p");
+            _out.WriteLine("  %z = icmp eq i8 %ch, 0");
+            _out.WriteLine("  br i1 %z, label %halt, label %wait");
+            _out.WriteLine("wait:");
+            _out.WriteLine($"  %frv = load volatile i32, ptr inttoptr (i32 {fr} to ptr)");
+            _out.WriteLine("  %txff = and i32 %frv, 32");
+            _out.WriteLine("  %full = icmp ne i32 %txff, 0");
+            _out.WriteLine("  br i1 %full, label %wait, label %putc");
+            _out.WriteLine("putc:");
+            _out.WriteLine("  %chw = zext i8 %ch to i32");
+            _out.WriteLine($"  store volatile i32 %chw, ptr inttoptr (i32 {dr} to ptr)");
+            _out.WriteLine("  %pn = getelementptr inbounds i8, ptr %p, i32 1");
+            _out.WriteLine("  br label %loop");
+        }
+        _out.WriteLine("halt:");
+        _out.WriteLine("  call void asm sideeffect \"\", \"\"()");
+        _out.WriteLine("  br label %halt");
+        _out.WriteLine("}");
+        _out.WriteLine();
     }
 
     private void CompileInlineAsm(InlineAsm ia)
@@ -819,6 +1011,8 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         {
             switch (v)
             {
+                // Register alias, not a real variable: reads resolve to @__pymcu_exn_code.
+                case Variable { Name: "__exn_r22_capture" }: break;
                 case Variable var when !_globals.Contains(var.Name): slots[var.Name] = var.Type; break;
                 case Temporary t: slots[t.Name] = t.Type; break;
             }
@@ -878,6 +1072,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             case JumpIfBitClear jbc: yield return jbc.Source; break;
             case AugAssign aa: yield return aa.Target; yield return aa.Operand; break;
             case Call call: foreach (var a in call.Args) yield return a; yield return call.Dst; break;
+            case SignalError se: yield return se.Code; break;
             case InlineAsm ia: if (ia.Operands != null) foreach (var a in ia.Operands) yield return a; break;
         }
     }

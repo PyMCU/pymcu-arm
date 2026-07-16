@@ -47,4 +47,7 @@ src/runtime/                        generic boot2 (crc32), crt0, rp2040.ld linke
 
 ## Status
 
-Alpha. MVP scope: single-core (core0), GPIO + UART0. No GC / exceptions / float yet.
+Alpha. Single-core (core0). GPIO, UART0, SPI, I2C, ADC, PWM, DMA, PIO.
+Exceptions (portable T-flag model), f32 (RP2040 via the bootrom fast-float
+library, RP2350 via the M33 FPU in softfp mode), operand-form inline asm.
+No GC yet.

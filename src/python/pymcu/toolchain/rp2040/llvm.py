@@ -227,13 +227,16 @@ class Rp2040LlvmToolchain(ExternalToolchain):
         # 1. Mid-level optimization (mem2reg, instcombine, ...).
         self._run([opt, "-O2", "-S", str(ll_file), "-o", str(opt_ll)])
 
-        # 2. Compile IR -> Thumb object. RP2350 (M33) is built soft-float so the
-        #    FPU is never used and the calling convention matches the soft-float
-        #    datalayout the backend emits.
+        # 2. Compile IR -> Thumb object. RP2350 (M33) compiles softfp: the
+        #    calling convention stays soft (matches the datalayout the backend
+        #    emits and the crt0 runtime), but f32 arithmetic selects the FPU
+        #    (FPv5-SP, VADD.F32/VCVT/VCMP) that cortex-m33 carries by default.
+        #    crt0_m33.S enables CPACR before main. RP2040 (M0+) has no FPU;
+        #    f32 lowers to __aeabi_f* libcalls over the bootrom fast-float shims.
         llc_cmd = [llc, f"-mtriple={triple}", f"-mcpu={cpu}",
                    "-O2", "-filetype=obj"]
         if is_rp2350:
-            llc_cmd += ["-float-abi=soft", "-mattr=-fpregs"]
+            llc_cmd += ["-float-abi=soft"]
         llc_cmd += [str(opt_ll), "-o", str(fw_o)]
         self._run(llc_cmd)
 

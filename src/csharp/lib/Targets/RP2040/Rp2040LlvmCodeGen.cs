@@ -14,10 +14,11 @@
 //   * The flat PyMCU instruction list (labels + jumps with implicit fall-through)
 //     is converted to a well-formed LLVM CFG (every basic block terminated).
 //
-// Covered: arithmetic (incl. f32 via the RP2040 bootrom fast-float library),
-// MMIO, bit ops, control flow, direct calls, arrays, flash tables, exceptions
-// (portable T-flag model) and operand-form inline asm. GC and vtables throw
-// NotSupportedException with a clear message.
+// Covered: arithmetic (incl. f32 -- RP2040 lowers to __aeabi_f* over the bootrom
+// fast-float library, RP2350 to the M33 FPU in softfp mode), MMIO, bit ops,
+// control flow, direct calls, arrays, flash tables, exceptions (portable T-flag
+// model) and operand-form inline asm. GC and vtables throw NotSupportedException
+// with a clear message.
 
 using System.Text;
 using PyMCU.Common.Models;
@@ -30,8 +31,8 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     // Per-target LLVM triple + cpu. The codegen is otherwise chip-agnostic: only
     // these two strings change per Cortex-M target. Both compile soft-float ABI;
     // on RP2040 the __aeabi_f* libcalls resolve to bootrom fast-float shims in
-    // crt0. RP2350 has no ROM float library (its M33 FPU is future work), so
-    // float programs are rejected there with a clear error.
+    // crt0. On RP2350 llc selects the M33 FPU (FPv5-SP) directly (softfp: VFP
+    // instructions, soft calling convention); crt0_m33 enables CPACR at reset.
     private static readonly Dictionary<string, (string Triple, string Cpu)> Targets =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -73,13 +74,6 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     {
         _out = output;
         _nakedFns = new HashSet<string>(program.Functions.Where(f => f.IsNaked).Select(f => f.Name));
-
-        // Float needs the __aeabi_f* runtime: RP2040's bootrom ships one (crt0 shims);
-        // RP2350's does not, and its M33 FPU path is not wired up yet.
-        if (ResolveTarget().Cpu == "cortex-m33" && ProgramUsesFloat(program))
-            throw new NotSupportedException(
-                "float is not supported on rp2350 yet (no ROM float library; the M33 FPU " +
-                "path is pending). Use the rp2040 target for float code, or integer math.");
 
         EmitModulePreamble();
 
@@ -206,19 +200,6 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine($"@llvm.used = appending global [{exported.Count} x ptr] " +
                            $"[{elems}], section \"llvm.metadata\"");
         }
-    }
-
-    private static bool ProgramUsesFloat(ProgramIR program)
-    {
-        foreach (var f in program.Functions)
-        {
-            if (f.ReturnType == DataType.FLOAT) return true;
-            foreach (var instr in f.Body)
-                foreach (var v in OperandsOf(instr))
-                    if (v is FloatConstant || ValType(v) == DataType.FLOAT)
-                        return true;
-        }
-        return false;
     }
 
     // Functions reachable from main / interrupt handlers / @export_c entry points,

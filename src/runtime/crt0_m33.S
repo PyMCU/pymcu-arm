@@ -6,9 +6,10 @@
  *   flash + 0x040 : picobin IMAGE_DEF block (picobin_rp2350.S)
  *   flash + ...   : .text / .rodata, then .data initialiser image
  *
- * Reset_Handler initialises the C environment (copy .data, zero .bss) and calls
- * main(). Single core, no interrupts, soft-float in the MVP (the backend emits
- * no FPU usage, so the FPU is left disabled).
+ * Reset_Handler initialises the C environment (enable the FPU, copy .data,
+ * zero .bss) and calls main(). Single core, no interrupts. Float uses the M33
+ * FPU (FPv5-SP) with the soft-float calling convention (softfp): CPACR grants
+ * CP10/CP11 full access before any VFP instruction can execute.
  */
 
     .syntax unified
@@ -45,6 +46,16 @@ __vectors:
     .type Reset_Handler, %function
     .thumb_func
 Reset_Handler:
+    /* Enable the FPU: CPACR (0xE000ED88) CP10/CP11 = full access (0b11 each).
+     * Must happen before any VFP instruction; DSB+ISB flush the pipeline so
+     * the grant is visible to the instructions that follow. */
+    ldr  r0, =0xE000ED88
+    ldr  r1, [r0]
+    orr  r1, r1, #(0xF << 20)
+    str  r1, [r0]
+    dsb
+    isb
+
     /* Copy .data from its flash load address (_sidata) to SRAM (_sdata.._edata). */
     ldr  r0, =_sdata
     ldr  r1, =_edata

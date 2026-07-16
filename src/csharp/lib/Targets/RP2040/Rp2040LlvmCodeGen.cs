@@ -14,9 +14,10 @@
 //   * The flat PyMCU instruction list (labels + jumps with implicit fall-through)
 //     is converted to a well-formed LLVM CFG (every basic block terminated).
 //
-// MVP subset: GPIO + UART (Copy/Binary/Unary/AugAssign, MMIO load/store, bit
-// ops, control flow, direct calls). GC, exceptions, float, vtables, arrays and
-// operand-form inline asm throw NotSupportedException with a clear message.
+// Covered: arithmetic (incl. f32 via the RP2040 bootrom fast-float library),
+// MMIO, bit ops, control flow, direct calls, arrays, flash tables, exceptions
+// (portable T-flag model) and operand-form inline asm. GC and vtables throw
+// NotSupportedException with a clear message.
 
 using System.Text;
 using PyMCU.Common.Models;
@@ -27,8 +28,10 @@ namespace PyMCU.Backend.Targets.RP2040;
 public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 {
     // Per-target LLVM triple + cpu. The codegen is otherwise chip-agnostic: only
-    // these two strings change per Cortex-M target. RP2350 is compiled soft-float
-    // (float is unsupported anyway), so the datalayout below is valid for both.
+    // these two strings change per Cortex-M target. Both compile soft-float ABI;
+    // on RP2040 the __aeabi_f* libcalls resolve to bootrom fast-float shims in
+    // crt0. RP2350 has no ROM float library (its M33 FPU is future work), so
+    // float programs are rejected there with a clear error.
     private static readonly Dictionary<string, (string Triple, string Cpu)> Targets =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -70,6 +73,14 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     {
         _out = output;
         _nakedFns = new HashSet<string>(program.Functions.Where(f => f.IsNaked).Select(f => f.Name));
+
+        // Float needs the __aeabi_f* runtime: RP2040's bootrom ships one (crt0 shims);
+        // RP2350's does not, and its M33 FPU path is not wired up yet.
+        if (ResolveTarget().Cpu == "cortex-m33" && ProgramUsesFloat(program))
+            throw new NotSupportedException(
+                "float is not supported on rp2350 yet (no ROM float library; the M33 FPU " +
+                "path is pending). Use the rp2040 target for float code, or integer math.");
+
         EmitModulePreamble();
 
         // Precompute signatures (param + return types) for call lowering.
@@ -195,6 +206,19 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine($"@llvm.used = appending global [{exported.Count} x ptr] " +
                            $"[{elems}], section \"llvm.metadata\"");
         }
+    }
+
+    private static bool ProgramUsesFloat(ProgramIR program)
+    {
+        foreach (var f in program.Functions)
+        {
+            if (f.ReturnType == DataType.FLOAT) return true;
+            foreach (var instr in f.Body)
+                foreach (var v in OperandsOf(instr))
+                    if (v is FloatConstant || ValType(v) == DataType.FLOAT)
+                        return true;
+        }
+        return false;
     }
 
     // Functions reachable from main / interrupt handlers / @export_c entry points,
@@ -323,7 +347,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
         switch (instr)
         {
-            case Copy c:        StoreI32(LoadI32(c.Src), c.Dst); break;
+            case Copy c:        CompileCopy(c); break;
             case Bitcast bc:    StoreI32(LoadI32(bc.Src), bc.Dst); break;
             case Unary u:       CompileUnary(u); break;
             case Binary b:      CompileBinary(b); break;
@@ -369,10 +393,21 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
             case InlineAsm ia:  CompileInlineAsm(ia); break;
 
+            case VirtualCall vc:
+                throw new NotSupportedException(
+                    $"ARM backend: virtual dispatch for '{vc.MethodName}' reached codegen. The " +
+                    "frontend normally devirtualizes every ZCA method call; if you see this, the " +
+                    "receiver's concrete class could not be resolved -- please report the case.");
+
+            case IndirectCall:
+                throw new NotSupportedException(
+                    "ARM backend: indirect calls (function-pointer invocation) are not lowered " +
+                    "yet. Call the function by name, or dispatch via match/if on a type tag.");
+
             default:
                 throw new NotSupportedException(
-                    $"RP2040 LLVM backend: IR instruction '{instr.GetType().Name}' is not supported yet " +
-                    "(MVP covers GPIO/UART: copy, arithmetic, bit ops, control flow, direct calls).");
+                    $"ARM backend: IR instruction '{instr.GetType().Name}' is not supported yet. " +
+                    "Every new IR instruction needs an explicit case here.");
         }
     }
 
@@ -491,6 +526,17 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     private void CompileUnary(Unary u)
     {
+        if (IsFloat(u.Src) || IsFloat(u.Dst))
+        {
+            if (u.Op != UnaryOp.Neg)
+                throw new NotSupportedException($"ARM backend: float unary op {u.Op}");
+            string fx = LoadF32(u.Src);
+            string fr = Fresh();
+            _out.WriteLine($"  {fr} = fneg float {fx}");
+            if (IsFloat(u.Dst)) StoreF32(fr, u.Dst);
+            else StoreFloatResult(fr, BinaryOp.Add /* arithmetic */, u.Dst);
+            return;
+        }
         string x = LoadI32(u.Src);
         string r = Fresh();
         switch (u.Op)
@@ -509,6 +555,17 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     private void CompileBinary(Binary b)
     {
+        // Float lane: any FLOAT operand or a FLOAT destination routes through f32
+        // (fadd/fsub/fmul/fdiv + fcmp). A non-float destination converts the result
+        // toward zero (the frontend folds int(<float expr>) into the dst type).
+        if (IsFloat(b.Src1) || IsFloat(b.Src2) || IsFloat(b.Dst))
+        {
+            string fa = LoadF32(b.Src1);
+            string fb = LoadF32(b.Src2);
+            string fr = EmitFloatBinOp(b.Op, fa, fb);
+            StoreFloatResult(fr, b.Op, b.Dst);
+            return;
+        }
         string a = LoadI32(b.Src1);
         string c = LoadI32(b.Src2);
         bool signed = IsSigned(b.Src1) || IsSigned(b.Src2);
@@ -516,8 +573,126 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         StoreI32(r, b.Dst);
     }
 
+    // Compile a Copy with float/int conversions when the source and destination
+    // widths disagree in kind (float<->int Copy IS the conversion in PyMCU IR).
+    private void CompileCopy(Copy c)
+    {
+        bool srcF = IsFloat(c.Src), dstF = IsFloat(c.Dst);
+        if (!srcF && !dstF) { StoreI32(LoadI32(c.Src), c.Dst); return; }
+        if (srcF && dstF) { StoreF32(LoadF32(c.Src), c.Dst); return; }
+        if (srcF)
+        {
+            // float -> int: convert toward zero, signedness from the destination.
+            string f = LoadF32(c.Src);
+            string r = Fresh();
+            string op = ValType(c.Dst).IsSigned() ? "fptosi" : "fptoui";
+            _out.WriteLine($"  {r} = {op} float {f} to i32");
+            StoreI32(r, c.Dst);
+            return;
+        }
+        // int -> float.
+        string iv = LoadI32(c.Src);
+        string fr = Fresh();
+        string cop = IsSigned(c.Src) ? "sitofp" : "uitofp";
+        _out.WriteLine($"  {fr} = {cop} i32 {iv} to float");
+        StoreF32(fr, c.Dst);
+    }
+
+    // A float binop result stored into an int destination converts toward zero;
+    // comparison results are already i1-zext-i32.
+    private void StoreFloatResult(string val, BinaryOp op, Val dst)
+    {
+        bool isCmp = op is BinaryOp.Equal or BinaryOp.NotEqual or BinaryOp.LessThan
+            or BinaryOp.LessEqual or BinaryOp.GreaterThan or BinaryOp.GreaterEqual;
+        if (isCmp) { StoreI32(val, dst); return; }
+        if (IsFloat(dst)) { StoreF32(val, dst); return; }
+        string r = Fresh();
+        string op2 = ValType(dst).IsSigned() ? "fptosi" : "fptoui";
+        _out.WriteLine($"  {r} = {op2} float {val} to i32");
+        StoreI32(r, dst);
+    }
+
+    private string EmitFloatBinOp(BinaryOp op, string a, string b)
+    {
+        string r = Fresh();
+        switch (op)
+        {
+            case BinaryOp.Add: _out.WriteLine($"  {r} = fadd float {a}, {b}"); return r;
+            case BinaryOp.Sub: _out.WriteLine($"  {r} = fsub float {a}, {b}"); return r;
+            case BinaryOp.Mul: _out.WriteLine($"  {r} = fmul float {a}, {b}"); return r;
+            case BinaryOp.Div:
+            case BinaryOp.FloorDiv: _out.WriteLine($"  {r} = fdiv float {a}, {b}"); return r;
+            case BinaryOp.Equal:        return ZextFcmp("oeq", a, b);
+            case BinaryOp.NotEqual:     return ZextFcmp("une", a, b);
+            case BinaryOp.LessThan:     return ZextFcmp("olt", a, b);
+            case BinaryOp.LessEqual:    return ZextFcmp("ole", a, b);
+            case BinaryOp.GreaterThan:  return ZextFcmp("ogt", a, b);
+            case BinaryOp.GreaterEqual: return ZextFcmp("oge", a, b);
+            default: throw new NotSupportedException($"float binary op {op}");
+        }
+    }
+
+    private string ZextFcmp(string pred, string a, string b)
+    {
+        string c1 = Fresh();
+        _out.WriteLine($"  {c1} = fcmp {pred} float {a}, {b}");
+        string r = Fresh();
+        _out.WriteLine($"  {r} = zext i1 {c1} to i32");
+        return r;
+    }
+
+    // Load a Val as an f32 (converting integer sources).
+    private string LoadF32(Val v)
+    {
+        switch (v)
+        {
+            case FloatConstant fc: return F32Lit(fc.Value);
+            case Variable var when var.Type == DataType.FLOAT:
+                return EmitLoad(SlotPtr(var.Name), DataType.FLOAT);
+            case Temporary t when t.Type == DataType.FLOAT:
+                return EmitLoad(SlotPtr(t.Name), DataType.FLOAT);
+            default:
+            {
+                string iv = LoadI32(v);
+                string r = Fresh();
+                string op = IsSigned(v) ? "sitofp" : "uitofp";
+                _out.WriteLine($"  {r} = {op} i32 {iv} to float");
+                return r;
+            }
+        }
+    }
+
+    private void StoreF32(string f32val, Val dst)
+    {
+        switch (dst)
+        {
+            case Variable var when var.Type == DataType.FLOAT:
+                EmitStore(f32val, DataType.FLOAT, SlotPtr(var.Name)); break;
+            case Temporary t when t.Type == DataType.FLOAT:
+                EmitStore(f32val, DataType.FLOAT, SlotPtr(t.Name)); break;
+            default:
+                throw new NotSupportedException(
+                    $"ARM backend: cannot store a float into '{dst.GetType().Name}'.");
+        }
+    }
+
+    // LLVM float literal: the exact hex64 form (every f32 is exactly representable).
+    private static string F32Lit(double v)
+    {
+        double asF32 = (float)v;
+        return "0x" + BitConverter.DoubleToInt64Bits(asF32).ToString("X16");
+    }
+
     private void CompileAug(AugAssign aa)
     {
+        if (IsFloat(aa.Target) || IsFloat(aa.Operand))
+        {
+            string fa = LoadF32(aa.Target);
+            string fb = LoadF32(aa.Operand);
+            string fr = EmitFloatBinOp(aa.Op, fa, fb);
+            StoreFloatResult(fr, aa.Op, aa.Target);
+            return;
+        }
         string cur = LoadI32(aa.Target);
         string operand = LoadI32(aa.Operand);
         bool signed = IsSigned(aa.Target) || IsSigned(aa.Operand);
@@ -745,6 +920,11 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         for (int i = 0; i < call.Args.Count; i++)
         {
             DataType at = ptypes != null && i < ptypes.Count ? ptypes[i] : DataType.UINT32;
+            if (at == DataType.FLOAT || IsFloat(call.Args[i]))
+            {
+                args.Add($"float {LoadF32(call.Args[i])}");
+                continue;
+            }
             string v = NarrowFromI32(LoadI32(call.Args[i]), at);
             args.Add($"{LlT(at)} {v}");
         }
@@ -766,7 +946,10 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             string r = Fresh();
             _out.WriteLine($"  {r} = {tailMod}call {LlT(ret)} @{Sym(callee)}({argList})");
             if (call.Dst is not NoneVal)
-                StoreI32(WidenToI32(r, ret), call.Dst);
+            {
+                if (ret == DataType.FLOAT) StoreF32(r, call.Dst);
+                else StoreI32(WidenToI32(r, ret), call.Dst);
+            }
         }
     }
 
@@ -781,6 +964,10 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         if (func.ReturnType == DataType.VOID || r.Value is NoneVal)
         {
             _out.WriteLine("  ret void");
+        }
+        else if (func.ReturnType == DataType.FLOAT)
+        {
+            _out.WriteLine($"  ret float {LoadF32(r.Value)}");
         }
         else
         {
@@ -927,12 +1114,83 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     private void CompileInlineAsm(InlineAsm ia)
     {
-        if (ia.Operands is { Count: > 0 })
-            throw new NotSupportedException(
-                "RP2040 LLVM backend: operand-form inline asm (asm(\"...\", a, b)) is not supported yet.");
-        // No-operand asm: emit as a side-effecting barrier carrying the raw text.
         string escaped = ia.Code.Replace("\\", "\\\\").Replace("\"", "\\22");
-        _out.WriteLine($"  call void asm sideeffect \"{escaped}\", \"\"()");
+
+        if (ia.Operands is not { Count: > 0 })
+        {
+            // No-operand asm: emit as a side-effecting barrier carrying the raw text.
+            _out.WriteLine($"  call void asm sideeffect \"{escaped}\", \"\"()");
+            return;
+        }
+
+        // Operand form: asm("...", a, b) with %0..%3 placeholders (same surface as AVR).
+        // Non-constant operands are tied read-write ("+r": loaded before, written back
+        // after -- AVR's semantics); constants are immediates ("i"). NOTE: unlike AVR
+        // (where %N is documented as R16+N), LLVM picks the registers -- portable
+        // snippets must not assume a specific register number. cc+memory are clobbered
+        // so LLVM doesn't cache values across the asm.
+        if (ia.Operands.Count > 4)
+            throw new NotSupportedException("asm() constraint: maximum 4 operands (%0-%3).");
+
+        // Constraint order is outputs-then-inputs; a "+r" is one output slot. Build the
+        // placeholder map from the source operand index to the LLVM $ slot.
+        var writable = new List<int>();   // operand indices that are "+r"
+        var immediates = new List<int>(); // operand indices that are "i"
+        for (int i = 0; i < ia.Operands.Count; i++)
+            (ia.Operands[i] is Constant ? immediates : writable).Add(i);
+
+        // Textual LLVM IR spells a tied read-write operand as an output "=r" plus an
+        // input tied by NUMBER ("0"), not "+r". $ slots number outputs first, then
+        // inputs: a writable operand's placeholder is its OUTPUT slot; immediates come
+        // after all outputs and the tied inputs.
+        int k = writable.Count;
+        var slotOf = new int[ia.Operands.Count];
+        for (int s = 0; s < writable.Count; s++) slotOf[writable[s]] = s;
+        for (int s = 0; s < immediates.Count; s++) slotOf[immediates[s]] = 2 * k + s;
+
+        string tmpl = escaped;
+        for (int i = ia.Operands.Count - 1; i >= 0; i--)
+            tmpl = tmpl.Replace("%" + i, "$" + slotOf[i]);
+
+        var constraints = new List<string>();
+        constraints.AddRange(writable.Select(_ => "=r"));
+        constraints.AddRange(Enumerable.Range(0, k).Select(s => s.ToString()));
+        constraints.AddRange(immediates.Select(_ => "i"));
+        constraints.Add("~{cc}");
+        constraints.Add("~{memory}");
+
+        var args = new List<string>();
+        foreach (int i in writable) args.Add($"i32 {LoadI32(ia.Operands[i])}");
+        foreach (int i in immediates) args.Add($"i32 {((Constant)ia.Operands[i]).Value}");
+
+        string retTy = writable.Count switch
+        {
+            0 => "void",
+            1 => "i32",
+            _ => "{ " + string.Join(", ", Enumerable.Repeat("i32", writable.Count)) + " }",
+        };
+        string cons = string.Join(",", constraints);
+        string argList = string.Join(", ", args);
+
+        if (writable.Count == 0)
+        {
+            _out.WriteLine($"  call void asm sideeffect \"{tmpl}\", \"{cons}\"({argList})");
+            return;
+        }
+
+        string res = Fresh();
+        _out.WriteLine($"  {res} = call {retTy} asm sideeffect \"{tmpl}\", \"{cons}\"({argList})");
+        if (writable.Count == 1)
+        {
+            StoreI32(res, ia.Operands[writable[0]]);
+            return;
+        }
+        for (int s = 0; s < writable.Count; s++)
+        {
+            string part = Fresh();
+            _out.WriteLine($"  {part} = extractvalue {retTy} {res}, {s}");
+            StoreI32(part, ia.Operands[writable[s]]);
+        }
     }
 
     // Emit `br i1 <cond>, label %target, label %fallthrough` and open the
@@ -954,6 +1212,19 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     private string IcmpRel(string basePred, Val s1, Val s2)
     {
+        if (IsFloat(s1) || IsFloat(s2))
+        {
+            string fa = LoadF32(s1);
+            string fb = LoadF32(s2);
+            string fc = Fresh();
+            string fpred = basePred switch
+            {
+                "eq" => "oeq", "ne" => "une", "lt" => "olt",
+                "le" => "ole", "gt" => "ogt", _ => "oge",
+            };
+            _out.WriteLine($"  {fc} = fcmp {fpred} float {fa}, {fb}");
+            return fc;
+        }
         string a = LoadI32(s1);
         string b = LoadI32(s2);
         bool signed = IsSigned(s1) || IsSigned(s2);
@@ -999,8 +1270,11 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         Variable var => var.Type,
         Temporary t  => t.Type,
         MemoryAddress m => m.Type,
+        FloatConstant => DataType.FLOAT,
         _ => DataType.UINT8
     };
+
+    private static bool IsFloat(Val v) => ValType(v) == DataType.FLOAT;
 
     // Build the slot table (named Variable / Temporary -> declared type) for a
     // function by scanning its params and body.
@@ -1085,8 +1359,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         DataType.FUNCREF or DataType.GC_REF => "i32",
         DataType.VOID => "void",
         DataType.UNKNOWN => "i8",
-        DataType.FLOAT => throw new NotSupportedException(
-            "RP2040 LLVM backend: floating-point is not supported yet."),
+        DataType.FLOAT => "float",
         _ => "i8"
     };
 

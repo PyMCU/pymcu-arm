@@ -24,9 +24,10 @@ public class FloatTests
     {
         using var pico = new PicoSimulation(withUsbCdc: false);
         pico.LoadFlash(_firmware);
-        pico.RunUntilOutput(pico.Uart0, "3", timeoutMs: 20_000).Should().BeTrue();
+        pico.RunUntilOutput(pico.Uart0, "-2.5", timeoutMs: 20_000).Should().BeTrue();
         pico.Uart0.Should().Contain("G");
         pico.Uart0.Should().Contain("57");
         pico.Uart0.Should().Contain("-2");
+        pico.Uart0.Should().Contain("5.7");   // print(float), one-decimal contract
     }
 }

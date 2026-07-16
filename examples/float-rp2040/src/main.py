@@ -10,6 +10,8 @@
 #   57
 #   -2
 #   3
+#   5.7
+#   -2.5
 from pymcu.types import uint16, int16
 from pymcu.hal.uart import UART
 
@@ -34,6 +36,9 @@ def main():
 
     q: uint16 = int(7.0 / 2.0)
     print(q)
+
+    print(d)          # 5.75 -> "5.7" (one-decimal contract, like AVR)
+    print(e)          # -2.5 -> "-2.5"
 
     while True:
         pass

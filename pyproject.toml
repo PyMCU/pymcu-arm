@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pymcu-arm"
-version = "0.1.0a1.post1"
+version = "0.1.0a3"
 description = "ARM (Cortex-M) support for pymcu-compiler: LLVM-IR codegen backend + LLVM toolchain driver"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ authors = [
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "pymcu-sdk>=0.1.0a1",
+    "pymcu-sdk>=0.1.0a3",
     "pymcu-arm-toolchain>=22.1.7; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'linux' and platform_machine == 'aarch64') or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
 ]
 

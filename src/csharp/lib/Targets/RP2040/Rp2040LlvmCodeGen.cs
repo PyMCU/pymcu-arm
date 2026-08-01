@@ -1100,7 +1100,11 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         if (ia.Operands is not { Count: > 0 })
         {
             // No-operand asm: emit as a side-effecting barrier carrying the raw text.
-            _out.WriteLine($"  call void asm sideeffect \"{escaped}\", \"\"()");
+            // ~{memory} makes it a full compiler barrier, matching the operand form.
+            // Without it LLVM may hoist loads above / sink stores below the snippet,
+            // which would let it move a critical section's body outside the CPSID I /
+            // CPSIE I pair emitted by pymcu.hal.irq.
+            _out.WriteLine($"  call void asm sideeffect \"{escaped}\", \"~{{memory}}\"()");
             return;
         }
 

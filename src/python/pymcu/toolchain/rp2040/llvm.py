@@ -21,6 +21,7 @@ Pipeline (assemble):
     llvm-mc                        boot2.S / crt0.S -> *.o
     ld.lld -T rp2040.ld            *.o -> firmware.elf
     llvm-objcopy -O binary         firmware.elf -> firmware.bin   (boot2 at offset 0)
+    uf2.write_uf2                  firmware.bin -> firmware.uf2   (BOOTSEL image)
 
 LLVM binaries are resolved from (in order): the vendored toolchain wheel cache
 under ~/.pymcu/tools, common system install dirs (e.g. Homebrew's keg), then
@@ -38,6 +39,8 @@ from typing import Optional
 
 from rich.console import Console
 from pymcu.toolchain.sdk import ExternalToolchain
+
+from .uf2 import write_uf2
 
 # Per-chip LLVM target: (triple, cpu). RP2350 is compiled soft-float (float is
 # unsupported in the backend anyway), so the same datalayout is valid for both.
@@ -265,6 +268,12 @@ class Rp2040LlvmToolchain(ExternalToolchain):
 
         # 5. Flatten to a raw flash image.
         self._run([objcopy, "-O", "binary", str(elf), str(binimg)])
+
+        # 6. Pack the same image as UF2 so `pymcu flash` can drag-and-drop it
+        #    onto the RPI-RP2 BOOTSEL volume (or hand it to picotool) with no
+        #    offset and no external tool.
+        write_uf2(Path(binimg), Path(binimg).with_suffix(".uf2"), self.chip)
+
         return Path(binimg)
 
     def link(self, hex_file: Path, chip: str, output_dir: Path):

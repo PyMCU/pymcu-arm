@@ -20,10 +20,14 @@ pymcuc --emit-ir        →  firmware.mir    (target-agnostic IR, 32-bit pointer
 pymcuc-arm (this pkg)   →  firmware.ll     (LLVM IR text)
 LLVM toolchain          →  opt → llc → ld.lld → llvm-objcopy
                             + generic boot2 (crc32) + crt0  →  firmware.bin
+UF2 packer              →  firmware.bin    →  firmware.uf2  (BOOTSEL image)
 ```
 
 The flat flash image (`firmware.bin`, boot2 at offset 0) is what the RP2040Sharp
 emulator's `PicoSimulation.LoadFlash(...)` consumes in the integration tests.
+`firmware.uf2` is the same image in UF2 form (family `0xe48bff56` on RP2040,
+`0xe48bff59` on RP2350) — it is what `pymcu flash` uploads with picotool or by
+drag-and-drop onto the RPI-RP2 volume.
 
 ## Installation
 

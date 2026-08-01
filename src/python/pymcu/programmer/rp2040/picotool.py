@@ -119,7 +119,8 @@ def _resolve_uf2(path: Path) -> Path:
         return candidate
     raise FileNotFoundError(
         f"Expected a .uf2 file for RP2040 flashing, got: {path}\n"
-        f"Looked for: {candidate}"
+        f"Looked for: {candidate}\n"
+        "Run 'pymcu build' again -- the build packs the .uf2 next to the .bin."
     )
 
 

@@ -8,7 +8,8 @@ Currently supported targets:
 
 | Target | Triple | CPU |
 |---|---|---|
-| RP2040 (Raspberry Pi Pico) | `thumbv6m-none-eabi` | `cortex-m0plus` |
+| RP2040 (Raspberry Pi Pico / Pico W) | `thumbv6m-none-eabi` | `cortex-m0plus` |
+| RP2350 (Raspberry Pi Pico 2 / Pico 2 W) | `thumbv8m.main-none-eabi` | `cortex-m33` |
 
 The codegen is chip-agnostic: only `-mtriple`/`-mcpu` change per target.
 
@@ -42,7 +43,8 @@ src/python/pymcu/backend/rp2040/    backend plugin — wraps pymcuc-arm
 src/python/pymcu/toolchain/rp2040/  LLVM toolchain driver (opt → firmware.bin)
 src/csharp/lib/                     Rp2040BackendProvider + Targets/RP2040/Rp2040LlvmCodeGen
 src/csharp/cli/                     pymcuc-arm runner CLI
-src/runtime/                        generic boot2 (crc32), crt0, rp2040.ld linker script
+src/python/pymcu/programmer/rp2040/ UF2/picotool flash programmer plugin
+src/runtime/                        boot2 (crc32), crt0 / crt0_m33, picobin block, rp2040.ld / rp2350.ld
 ```
 
 ## Status

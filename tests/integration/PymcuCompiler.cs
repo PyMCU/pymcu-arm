@@ -41,6 +41,13 @@ public static class PymcuCompiler
         => BinCache.GetOrAdd("rp2350:ex:" + name,
             _ => new Lazy<byte[]>(() => CompileBin(Path.Combine(RepoRoot, "examples", name), name))).Value;
 
+    /// <summary>
+    /// Absolute path of an example directory — for tests that inspect build
+    /// artifacts (e.g. <c>dist/debug/firmware.opt.ll</c>) after a Build* call.
+    /// </summary>
+    public static string ExampleDir(string name)
+        => Path.Combine(RepoRoot, "examples", name);
+
     private static byte[] CompileBin(string projectDir, string name)
     {
         BuildGate.Wait();

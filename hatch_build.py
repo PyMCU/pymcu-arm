@@ -85,6 +85,22 @@ class CustomBuildHook(BuildHookInterface):
 
         build_data["artifacts"].append(str(dst.relative_to(root)))
 
+        # Runtime sources (boot2.S, crt0*.S, picobin_rp2350.S, linker scripts):
+        # the toolchain driver expects them bundled next to its module
+        # (pymcu/toolchain/rp2040/runtime/); in the repo they live in
+        # src/runtime/. Copy them into the wheel layout.
+        runtime_src = root / "src" / "runtime"
+        runtime_dst = (
+            root / "src" / "python" / "pymcu" / "toolchain" / "rp2040" / "runtime"
+        )
+        runtime_dst.mkdir(parents=True, exist_ok=True)
+        for item in sorted(runtime_src.iterdir()):
+            if item.is_file():
+                target = runtime_dst / item.name
+                shutil.copy2(str(item), str(target))
+                build_data["artifacts"].append(str(target.relative_to(root)))
+        self.app.display_info(f"[hatch-hook] Runtime sources placed at: {runtime_dst}")
+
         plat_tag = _get_wheel_platform_tag()
         build_data["pure_python"] = False
         build_data["tag"] = f"py3-none-{plat_tag}"

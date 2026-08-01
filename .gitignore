@@ -42,3 +42,4 @@ obj/
 *.suo
 *.sln.DotSettings.user
 src/python/pymcu/backend/rp2040/pymcuc-arm
+src/python/pymcu/toolchain/rp2040/runtime/

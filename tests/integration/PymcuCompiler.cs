@@ -48,6 +48,45 @@ public static class PymcuCompiler
     public static string ExampleDir(string name)
         => Path.Combine(RepoRoot, "examples", name);
 
+    /// <summary>
+    /// Compiles a generated RP2040 program given as source text, for corpora that are
+    /// produced in-process rather than checked in. The program is materialized into a
+    /// throwaway project under the system temp directory and built with <c>pymcu build</c>.
+    /// Cached by content hash so identical programs compile once.
+    /// </summary>
+    public static byte[] BuildSourceRp2040(string mainPy)
+        => BinCache.GetOrAdd("rp:src:" + Sha(mainPy), _ => new Lazy<byte[]>(() => CompileSource(mainPy))).Value;
+
+    /// <summary>
+    /// Directory of the throwaway project <see cref="BuildSourceRp2040"/> builds, for tests
+    /// that need its artifacts (e.g. <c>dist/debug/firmware.opt.ll</c>).
+    /// </summary>
+    public static string SourceDir(string mainPy)
+        => Path.Combine(Path.GetTempPath(), "pymcu-arm-gen", Sha(mainPy)[..16]);
+
+    private static string Sha(string s)
+    {
+        var bytes = System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(s));
+        return Convert.ToHexString(bytes);
+    }
+
+    private static byte[] CompileSource(string mainPy)
+    {
+        var dir = SourceDir(mainPy);
+        Directory.CreateDirectory(Path.Combine(dir, "src"));
+        File.WriteAllText(Path.Combine(dir, "pyproject.toml"),
+            "[project]\n" +
+            "name = \"gen\"\n" +
+            "version = \"0.1.0\"\n\n" +
+            "[tool.pymcu]\n" +
+            "target = \"rp2040\"\n" +
+            "frequency = 125000000\n" +
+            "sources = \"src\"\n" +
+            "entry = \"main.py\"\n");
+        File.WriteAllText(Path.Combine(dir, "src", "main.py"), mainPy);
+        return CompileBin(dir, "gen-" + Sha(mainPy)[..8]);
+    }
+
     private static byte[] CompileBin(string projectDir, string name)
     {
         BuildGate.Wait();

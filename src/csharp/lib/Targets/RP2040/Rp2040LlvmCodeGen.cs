@@ -689,9 +689,13 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             case BinaryOp.Add:      _out.WriteLine($"  {r} = add i32 {a}, {b}"); break;
             case BinaryOp.Sub:      _out.WriteLine($"  {r} = sub i32 {a}, {b}"); break;
             case BinaryOp.Mul:      _out.WriteLine($"  {r} = mul i32 {a}, {b}"); break;
-            case BinaryOp.Div:      _out.WriteLine($"  {r} = {(signed ? "sdiv" : "udiv")} i32 {a}, {b}"); break;
-            case BinaryOp.FloorDiv: _out.WriteLine($"  {r} = {(signed ? "sdiv" : "udiv")} i32 {a}, {b}"); break;
-            case BinaryOp.Mod:      _out.WriteLine($"  {r} = {(signed ? "srem" : "urem")} i32 {a}, {b}"); break;
+            case BinaryOp.Div:
+            case BinaryOp.FloorDiv:
+                if (!signed) { _out.WriteLine($"  {r} = udiv i32 {a}, {b}"); break; }
+                return EmitSignedFloorDiv(a, b);
+            case BinaryOp.Mod:
+                if (!signed) { _out.WriteLine($"  {r} = urem i32 {a}, {b}"); break; }
+                return EmitSignedFloorMod(a, b);
             case BinaryOp.BitAnd:   _out.WriteLine($"  {r} = and i32 {a}, {b}"); break;
             case BinaryOp.BitOr:    _out.WriteLine($"  {r} = or i32 {a}, {b}"); break;
             case BinaryOp.BitXor:   _out.WriteLine($"  {r} = xor i32 {a}, {b}"); break;
@@ -706,6 +710,60 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             default: throw new NotSupportedException($"binary op {op}");
         }
         return r;
+    }
+
+    private string EmitDivisorGuard(string b, out string isMinusOne)
+    {
+        isMinusOne = Fresh();
+        _out.WriteLine($"  {isMinusOne} = icmp eq i32 {b}, -1");
+        string safe = Fresh();
+        _out.WriteLine($"  {safe} = select i1 {isMinusOne}, i32 1, i32 {b}");
+        return safe;
+    }
+
+    private string EmitFloorCorrectionFlag(string rem, string b)
+    {
+        string nonZero = Fresh();
+        _out.WriteLine($"  {nonZero} = icmp ne i32 {rem}, 0");
+        string signBits = Fresh();
+        _out.WriteLine($"  {signBits} = xor i32 {rem}, {b}");
+        string opposite = Fresh();
+        _out.WriteLine($"  {opposite} = icmp slt i32 {signBits}, 0");
+        string need = Fresh();
+        _out.WriteLine($"  {need} = and i1 {nonZero}, {opposite}");
+        return need;
+    }
+
+    private string EmitSignedFloorDiv(string a, string b)
+    {
+        string safe = EmitDivisorGuard(b, out string isMinusOne);
+        string trunc = Fresh();
+        _out.WriteLine($"  {trunc} = sdiv i32 {a}, {safe}");
+        string negated = Fresh();
+        _out.WriteLine($"  {negated} = sub i32 0, {a}");
+        string quot = Fresh();
+        _out.WriteLine($"  {quot} = select i1 {isMinusOne}, i32 {negated}, i32 {trunc}");
+        string rem = Fresh();
+        _out.WriteLine($"  {rem} = srem i32 {a}, {safe}");
+        string need = EmitFloorCorrectionFlag(rem, b);
+        string lowered = Fresh();
+        _out.WriteLine($"  {lowered} = sub i32 {quot}, 1");
+        string res = Fresh();
+        _out.WriteLine($"  {res} = select i1 {need}, i32 {lowered}, i32 {quot}");
+        return res;
+    }
+
+    private string EmitSignedFloorMod(string a, string b)
+    {
+        string safe = EmitDivisorGuard(b, out _);
+        string rem = Fresh();
+        _out.WriteLine($"  {rem} = srem i32 {a}, {safe}");
+        string need = EmitFloorCorrectionFlag(rem, b);
+        string shifted = Fresh();
+        _out.WriteLine($"  {shifted} = add i32 {rem}, {b}");
+        string res = Fresh();
+        _out.WriteLine($"  {res} = select i1 {need}, i32 {shifted}, i32 {rem}");
+        return res;
     }
 
     private string ZextCmp(string basePred, string a, string b, bool signed)

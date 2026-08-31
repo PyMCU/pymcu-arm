@@ -27,8 +27,11 @@ namespace PyMCU.IntegrationTests.Tests.RP2040;
 /// clock source, no elapsed time, no Hz and no setup/hold anywhere in RP2040Sharp.Wireless.
 /// It checks the SEQUENCE of edges, never their spacing.
 ///
-/// And the spacing really does differ between the two boards. The driver contains no delay
-/// and never reads __FREQ__, so the gSPI clock is set entirely by the instruction stream:
+/// And the spacing really does differ between the two boards. The bring-up path this test
+/// measures contains no delay and never reads __FREQ__, so its gSPI clock is set entirely by
+/// the instruction stream. (The driver as a whole is no longer delay-free: join_wpa2 waits
+/// 2 ms before WLC_SET_WSEC_PMK, which the radio firmware needs before it will take the PMK.
+/// That is in the JOIN path and nothing here reaches it, so the figures below still stand.)
 /// 125 MHz on this part against 150 on the RP2350, on an M0+ rather than an M33.
 ///
 /// So the spacing was measured apart from this test, by counting clk_sys cycles between

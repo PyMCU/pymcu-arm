@@ -1,7 +1,7 @@
 import asyncio
 from machine import Pin
 from dht import DHT11
-from pymcu.hal.rp2350.cyw43 import CYW43
+from pymcu.hal.wifi import CYW43
 from pymcu.types import uint8, uint32
 
 led  = Pin(25, Pin.OUT)

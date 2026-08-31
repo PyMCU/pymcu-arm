@@ -1,7 +1,7 @@
 # CYW43439 WiFi on a Pico 2 W: gSPI bring-up -> WLAN join -> read the post-join async
 # events -> connect to the emulator's MQTT broker and PUBLISH a reading (42) to "dht".
 # Validated end-to-end against the RP2350Sharp CYW43439 model + built-in broker.
-from pymcu.hal.rp2350.cyw43 import CYW43
+from pymcu.hal.wifi import CYW43
 from pymcu.types import ptr, uint32, uint8
 
 

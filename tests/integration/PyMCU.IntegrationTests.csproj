@@ -12,6 +12,12 @@
     <ItemGroup>
         <!-- RP2040Sharp.TestKit is published on nuget.org -->
         <PackageReference Include="RP2040Sharp.TestKit" Version="1.0.0" />
+        <!-- The RP2040's CYW43439 model, for the Pico W half of the WiFi bring-up.
+             PicoWSimulation only exists from 1.1.0, and the newest TestKit published is
+             1.0.4, so no same-version pair exists: this unifies RP2040Sharp to 1.1.1 under a
+             TestKit built against 1.0.0. The suite is green on that skew, and a published
+             TestKit 1.1.x would remove it. -->
+        <PackageReference Include="RP2040Sharp.Wireless" Version="1.1.1" />
         <!-- RP2350.TestKit is not on nuget.org yet: reference the sibling repo locally.
              Assumes RP2350Sharp is checked out beside pymcu-arm under the same parent. -->
         <ProjectReference Include="../../../RP2350Sharp/src/RP2350.TestKit/RP2350.TestKit.csproj" />

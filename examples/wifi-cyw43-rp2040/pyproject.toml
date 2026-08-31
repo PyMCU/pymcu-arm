@@ -1,0 +1,18 @@
+[project]
+name = "rp2040-wifi-cyw43"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+# Identical to examples/wifi-cyw43-rp2350 except for what describes the BOARD: target,
+# frequency and the project name. `src/main.py` is byte-identical and a test asserts it.
+#
+# The frequency is each part's own, 125 against 150 MHz, and it is not cosmetic: the driver
+# has no delay and never reads __FREQ__, so the gSPI clock comes entirely from the instruction
+# stream and the two boards bit-bang the bus at different rates. The emulator is edge-driven
+# and cannot see that; see the note in Tests/RP2040/Cyw43BringUpTests.
+[tool.pymcu]
+target    = "rp2040"
+frequency = 125000000
+sources   = "src"
+entry     = "main.py"
+stdlib    = ["micropython"]

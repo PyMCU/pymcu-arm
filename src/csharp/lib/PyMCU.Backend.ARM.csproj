@@ -11,7 +11,14 @@
   <ItemGroup>
     <!-- pymcu-sdk lives in the PyMCU/pymcu monorepo.
          Expects both repos checked out as siblings: ../pymcu/ next to ../pymcu-arm/ -->
-    <ProjectReference Include="..\..\..\..\pymcu\extensions\pymcu-sdk\csharp\PyMCU.Backend.SDK.csproj" />
+    <!-- PyMCU, not pymcu: the directory on disk is PyMCU, and MSBuild does NOT resolve a
+         reference at the wrong case. Measured on a case-sensitive APFS volume, with a
+         control run at the correct spelling on the same volume:
+             ..\pymcu\... -> MSB9008 "does not exist", and the build reports 0 Errors
+             ..\PyMCU\... -> resolves
+         The wrong case does not fail the build, it DROPS the reference and goes green,
+         so a case-sensitive CI passes on an artifact missing a dependency. -->
+    <ProjectReference Include="..\..\..\..\PyMCU\extensions\pymcu-sdk\csharp\PyMCU.Backend.SDK.csproj" />
   </ItemGroup>
 
 </Project>

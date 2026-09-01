@@ -98,4 +98,38 @@ public class Cyw43Wpa2Tests
         var (_, joined) = Run("not-hunter2", "hunter2");
         joined.Should().BeNull("a mismatched PSK must stall the supplicant instead of joining");
     }
+
+    /// <summary>Every F2 packet carries an SDPCM sequence number in byte 4, and it advances.
+    /// It is half the chip's bus credit flow control: the chip grants credit ahead of the
+    /// host's last sequence, so a host that never advances is asking for the same credit
+    /// forever. The emulator READS byte 4 -- it tracks it to decide what credit to grant --
+    /// but it forgives a host that never moves, which is why every frame claiming packet zero
+    /// went unnoticed until it was read for.</summary>
+    [Test]
+    public void EveryF2PacketAdvancesTheSdpcmSequence()
+    {
+        using var pico = PicoWSimulation.Create(_firmware);
+        pico.OfferAp("RP2350Sharp-AP", password: "hunter2");
+
+        var seqs = new List<int>();
+        string? joined = null;
+        pico.Radio.OnWriteDebug += (fn, addr, host) =>
+        {
+            // F2 is the WLAN data function: an SDPCM frame follows the 4-byte command word,
+            // so byte 4 of its header is host[8].
+            if (fn == 2 && host.Length >= 16) seqs.Add(host[8]);
+        };
+        pico.Wifi.OnStaJoin += s => joined = s;
+
+        for (int i = 0; i < 400_000 && joined == null; i++) pico.Step();
+        for (int i = 0; i < 40_000; i++) pico.Step();
+
+        seqs.Should().NotBeEmpty("the join sends SDPCM frames over F2");
+        seqs.Distinct().Should().HaveCountGreaterThan(1,
+            "the sequence must advance; every frame carrying the same number is the defect this "
+            + $"pins. Saw: {string.Join(",", seqs)}");
+        seqs.Should().BeEquivalentTo(Enumerable.Range(seqs[0], seqs.Count).Select(v => v & 0xFF),
+            options => options.WithStrictOrdering(),
+            "consecutive frames carry consecutive sequence numbers");
+    }
 }

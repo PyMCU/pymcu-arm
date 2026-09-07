@@ -34,11 +34,11 @@ jobs:
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: pymcu/global.json
+          global-json-file: PyMCU/global.json
 
       - name: Build pymcuc compiler
         shell: bash
-        working-directory: pymcu
+        working-directory: PyMCU
         run: dotnet publish src/compiler/PyMCU.csproj -c Release -o ../pymcu-arm/build/bin --nologo
 
       - name: Build pymcuc-arm backend CLI
@@ -75,7 +75,7 @@ jobs:
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: pymcu/global.json
+          global-json-file: PyMCU/global.json
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -88,7 +88,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build pymcuc compiler
-        working-directory: pymcu
+        working-directory: PyMCU
         run: |
           dotnet publish src/compiler/PyMCU.csproj \
             -c Release -o ../pymcu-arm/build/bin --nologo

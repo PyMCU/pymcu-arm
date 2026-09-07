@@ -28,7 +28,7 @@ jobs:
         with:
           repository: PyMCU/PyMCU
           ref: main
-          path: pymcu
+          path: PyMCU
           submodules: false
 
       - name: Set up .NET 10
@@ -69,7 +69,7 @@ jobs:
         with:
           repository: PyMCU/PyMCU
           ref: main
-          path: pymcu
+          path: PyMCU
           submodules: recursive
 
       - name: Set up .NET 10

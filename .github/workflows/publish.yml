@@ -44,7 +44,7 @@ jobs:
 
     steps:
       # Both repos checked out as siblings so the relative csproj path
-      # ../../../../pymcu/extensions/pymcu-sdk/csharp/PyMCU.Backend.SDK.csproj
+      # ../../../../PyMCU/extensions/pymcu-sdk/csharp/PyMCU.Backend.SDK.csproj
       # resolves correctly from src/csharp/lib/ inside pymcu-arm/.
       - name: Checkout pymcu-arm
         uses: actions/checkout@v4

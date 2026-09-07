@@ -104,12 +104,12 @@ jobs:
         run: |
           uv venv .venv
           uv pip install --python .venv pymcu-sdk
-          uv pip install --python .venv -e ../pymcu/lib  # development stdlib
+          uv pip install --python .venv -e ../PyMCU/lib  # development stdlib
           uv pip install --python .venv pymcu-arm-toolchain
-          uv pip install --python .venv -e ../pymcu
+          uv pip install --python .venv -e ../PyMCU
           uv pip install --python .venv -e . --no-deps
-          uv pip install --python .venv -e ../pymcu/external/pymcu-micropython
-          uv pip install --python .venv -e ../pymcu/external/pymcu-circuitpython
+          uv pip install --python .venv -e ../PyMCU/external/pymcu-micropython
+          uv pip install --python .venv -e ../PyMCU/external/pymcu-circuitpython
 
       - name: Configure environment
         working-directory: pymcu-arm

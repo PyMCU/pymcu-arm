@@ -58,17 +58,30 @@ def _resolve_target(chip: str) -> tuple[str, str]:
     """Map a chip id to its (triple, cpu); default to RP2040."""
     return _TARGETS.get((chip or "").lower(), (TARGET_TRIPLE, TARGET_CPU))
 
-# Native-module (.mpy) architectures, keyed by chip. The name is CircuitPython's
-# own `--arch` spelling for tools/mpy_ld.py; the triple and cpu are what llc needs
-# to emit code that runtime will accept.
+# Native-module (.mpy) architectures, keyed by chip:
+#   (mpy arch name, llvm triple, llvm cpu, extra llc flags)
 #
-# rp2350 is built as armv7em, not armv8m: CircuitPython's loader identifies the
-# RP2350 port as armv7emsp and mpy_ld.py has no armv8m entry at all, so the .mpy
-# header has to say armv7emsp. Cortex-M33 runs armv7em code, so this costs nothing
-# but the v8m-only instructions, which an integer kernel does not use.
+# The arch name is CircuitPython's own `--arch` spelling for tools/mpy_ld.py, and it
+# goes in the .mpy header, so it is a PROMISE to every board of that architecture and
+# not only to the one this project targets. The cpu is chosen to keep that promise,
+# which is why it is NOT the chip's own core:
+#
+#   rp2350 -> cortex-m4, not cortex-m33. The loader identifies that port as armv7emsp
+#     and mpy_ld.py has no armv8m entry at all, so the header has to say armv7emsp.
+#     Measured: `-mtriple=thumbv7em -mcpu=cortex-m33` still stamps the object
+#     CPU_arch = ARM v8-M Mainline, so the code was free to use v8m-only instructions
+#     under a header promising v7E-M. An M33 would have run it and an M4 or M7 board
+#     would not. cortex-m4 makes the object say what the header says.
+#   rp2040 -> cortex-m0, not cortex-m0plus, for the same reason: armv6m in the header
+#     covers M0 boards too.
+#
+# The float flags are py/dynruntime.mk's for that arch, so the kernel and the
+# generated adapter agree about the float ABI. Nothing crosses the boundary as a float
+# today, but the two objects call each other directly and a silent disagreement here
+# would be found the day one does.
 _NATMOD_ARCHES = {
-    "rp2040": ("armv6m", "thumbv6m-none-eabi", "cortex-m0plus"),
-    "rp2350": ("armv7emsp", "thumbv7em-none-eabi", "cortex-m33"),
+    "rp2040": ("armv6m", "thumbv6m-none-eabi", "cortex-m0", []),
+    "rp2350": ("armv7emsp", "thumbv7em-none-eabi", "cortex-m4", ["-float-abi=hard"]),
 }
 
 _REQUIRED_BINS = ["opt", "llc", "llvm-mc", "ld.lld", "llvm-objcopy"]
@@ -292,8 +305,8 @@ class Rp2040LlvmToolchain(ExternalToolchain):
     # ── native-module (.mpy) object ──────────────────────────────────────────
 
     @staticmethod
-    def natmod_arch(chip: str) -> tuple[str, str, str]:
-        """(mpy arch name, llvm triple, llvm cpu) for a native-module build."""
+    def natmod_arch(chip: str) -> tuple[str, str, str, list[str]]:
+        """(mpy arch name, llvm triple, llvm cpu, extra llc flags) for a native module."""
         try:
             return _NATMOD_ARCHES[(chip or "").lower()]
         except KeyError:
@@ -326,7 +339,7 @@ class Rp2040LlvmToolchain(ExternalToolchain):
         out_dir = ll_file.parent
         obj = Path(output_file) if output_file else (out_dir / (ll_file.stem + ".o"))
 
-        _, triple, cpu = self.natmod_arch(self.chip)
+        _, triple, cpu, extra = self.natmod_arch(self.chip)
 
         opt = self._find_bin("opt")
         llc = self._find_bin("llc")
@@ -340,6 +353,7 @@ class Rp2040LlvmToolchain(ExternalToolchain):
             "-O2", "-filetype=obj",
             # The one flag the whole mode turns on.
             "-relocation-model=pic",
+            *extra,
             str(opt_ll), "-o", str(obj),
         ])
 

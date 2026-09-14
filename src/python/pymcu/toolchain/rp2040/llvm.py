@@ -58,6 +58,19 @@ def _resolve_target(chip: str) -> tuple[str, str]:
     """Map a chip id to its (triple, cpu); default to RP2040."""
     return _TARGETS.get((chip or "").lower(), (TARGET_TRIPLE, TARGET_CPU))
 
+# Native-module (.mpy) architectures, keyed by chip. The name is CircuitPython's
+# own `--arch` spelling for tools/mpy_ld.py; the triple and cpu are what llc needs
+# to emit code that runtime will accept.
+#
+# rp2350 is built as armv7em, not armv8m: CircuitPython's loader identifies the
+# RP2350 port as armv7emsp and mpy_ld.py has no armv8m entry at all, so the .mpy
+# header has to say armv7emsp. Cortex-M33 runs armv7em code, so this costs nothing
+# but the v8m-only instructions, which an integer kernel does not use.
+_NATMOD_ARCHES = {
+    "rp2040": ("armv6m", "thumbv6m-none-eabi", "cortex-m0plus"),
+    "rp2350": ("armv7emsp", "thumbv7em-none-eabi", "cortex-m33"),
+}
+
 _REQUIRED_BINS = ["opt", "llc", "llvm-mc", "ld.lld", "llvm-objcopy"]
 
 # Extra directories to probe for LLVM binaries when they are not on PATH.
@@ -275,6 +288,67 @@ class Rp2040LlvmToolchain(ExternalToolchain):
         write_uf2(Path(binimg), Path(binimg).with_suffix(".uf2"), self.chip)
 
         return Path(binimg)
+
+    # ── native-module (.mpy) object ──────────────────────────────────────────
+
+    @staticmethod
+    def natmod_arch(chip: str) -> tuple[str, str, str]:
+        """(mpy arch name, llvm triple, llvm cpu) for a native-module build."""
+        try:
+            return _NATMOD_ARCHES[(chip or "").lower()]
+        except KeyError:
+            raise RuntimeError(
+                f"No native-module architecture is defined for target '{chip}'. "
+                f"Supported: {', '.join(sorted(_NATMOD_ARCHES))}."
+            ) from None
+
+    def assemble_natmod(self, ll_file: Path, output_file: Optional[Path] = None) -> Path:
+        """
+        Compile the backend's LLVM IR into a RELOCATABLE OBJECT for a MicroPython /
+        CircuitPython native module, and return its path.
+
+        This is the whole difference from assemble(): no link, so no entry point, no
+        crt0, no vector table, no linker script and no libc. CircuitPython's
+        tools/mpy_ld.py is the linker, and it places the code itself at load time.
+
+        Two things it needs that a firmware object does not:
+
+          * position independence. Every reference that leaves the object has to go
+            through the GOT, because R_ARM_GOT_BREL is the ONLY relocation mpy_ld.py
+            accepts for a symbol it has to resolve. `-relocation-model=pic` is what
+            makes llc emit that form.
+          * only .text / .rodata / .data.rel.ro / .bss. mpy_ld.py refuses a non-empty
+            .data outright, and silently ignores anything else. The unwind tables are
+            dropped here rather than left to be ignored, so that what ships is only
+            what the loader will look at.
+        """
+        ll_file = Path(ll_file)
+        out_dir = ll_file.parent
+        obj = Path(output_file) if output_file else (out_dir / (ll_file.stem + ".o"))
+
+        _, triple, cpu = self.natmod_arch(self.chip)
+
+        opt = self._find_bin("opt")
+        llc = self._find_bin("llc")
+        objcopy = self._find_bin("llvm-objcopy")
+
+        opt_ll = out_dir / (ll_file.stem + ".opt.ll")
+        self._run([opt, "-O2", "-S", str(ll_file), "-o", str(opt_ll)])
+
+        self._run([
+            llc, f"-mtriple={triple}", f"-mcpu={cpu}",
+            "-O2", "-filetype=obj",
+            # The one flag the whole mode turns on.
+            "-relocation-model=pic",
+            str(opt_ll), "-o", str(obj),
+        ])
+
+        # .ARM.exidx is unwind data for a runtime that is not there. mpy_ld.py skips
+        # it (it is neither PROGBITS nor NOBITS), but an object that carries sections
+        # the loader will never map invites the next reader to wonder whether it does.
+        self._run([objcopy, "--remove-section=.ARM.exidx*", str(obj)])
+
+        return obj
 
     def link(self, hex_file: Path, chip: str, output_dir: Path):
         """ELF + size report are produced as a side effect of assemble(); the

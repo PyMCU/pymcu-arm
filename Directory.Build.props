@@ -11,7 +11,7 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <IsAotCompatible>true</IsAotCompatible>
-    <Version>0.1.0-alpha.1</Version>
+    <Version>0.1.0-alpha.6</Version>
     <Authors>Ivan Montiel Cardona and the PyMCU Project Authors</Authors>
     <Copyright>Copyright (C) 2026 Ivan Montiel Cardona and the PyMCU Project Authors</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

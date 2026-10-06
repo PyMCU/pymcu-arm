@@ -63,4 +63,22 @@ public class MpUartEchoTests
             pico.Uart0.Bytes[^1].Should().Be(b);
         }
     }
+
+    [Test]
+    public void Echo_TwoByteBurst()
+    {
+        // Two bytes injected back-to-back: both must sit in the UART FIFO and be
+        // echoed in order -- the firmware reads one byte per loop iteration.
+        using var pico = Sim();
+        pico.RunUntilOutput(pico.Uart0, "READY", timeoutMs: 20_000);
+        var before = pico.Uart0.ByteCount;
+
+        pico.Uart0.InjectByte(0x41); // 'A'
+        pico.Uart0.InjectByte(0x5A); // 'Z'
+        pico.RunUntilOutput(pico.Uart0, _ => pico.Uart0.ByteCount >= before + 2, timeoutMs: 5_000)
+            .Should().BeTrue("both bytes of a burst should be echoed");
+
+        pico.Uart0.Bytes[^2].Should().Be(0x41);
+        pico.Uart0.Bytes[^1].Should().Be(0x5A);
+    }
 }

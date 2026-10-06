@@ -18,12 +18,35 @@
              TestKit built against 1.0.0. The suite is green on that skew, and a published
              TestKit 1.1.x would remove it. -->
         <PackageReference Include="RP2040Sharp.Wireless" Version="1.1.1" />
-        <!-- RP2350.TestKit is not on nuget.org yet: reference the sibling repo locally.
-             Assumes RP2350Sharp is checked out beside pymcu-arm under the same parent. -->
+    </ItemGroup>
+
+    <!-- The RP2350 half of the suite (Tests/RP2350/) needs RP2350Sharp, which is a PRIVATE
+         repository and not on nuget.org: it is referenced as a sibling checkout beside
+         pymcu-arm. The RP2040 half needs only the RP2040Sharp packages above.
+
+         IncludeRp2350Tests defaults to true, so a local build without the sibling still
+         stops at PYMCUSIB001 and says what to clone. Passing -p:IncludeRp2350Tests=false
+         drops the RP2350 tests and the two references, and says so in a build warning, so
+         a run that measured only the RP2040 is never mistaken for a full one. CI passes it
+         when it has no token that can clone RP2350Sharp. -->
+    <PropertyGroup>
+        <IncludeRp2350Tests Condition="'$(IncludeRp2350Tests)' == ''">true</IncludeRp2350Tests>
+    </PropertyGroup>
+
+    <ItemGroup Condition="'$(IncludeRp2350Tests)' == 'true'">
         <ProjectReference Include="../../../RP2350Sharp/src/RP2350.TestKit/RP2350.TestKit.csproj" />
         <!-- The CYW43439 WiFi chip model, to validate the PyMCU WiFi HAL's gSPI bring-up. -->
         <ProjectReference Include="../../../RP2350Sharp/src/RP2350.Wireless/RP2350.Wireless.csproj" />
     </ItemGroup>
+
+    <ItemGroup Condition="'$(IncludeRp2350Tests)' != 'true'">
+        <Compile Remove="Tests/RP2350/**" />
+    </ItemGroup>
+
+    <Target Name="WarnRp2350TestsExcluded" BeforeTargets="Build"
+            Condition="'$(IncludeRp2350Tests)' != 'true'">
+        <Warning Code="PYMCURP2350" Text="IncludeRp2350Tests=false: the RP2350 integration tests (Tests/RP2350/) are NOT compiled and will not run. Only the RP2040 half of the suite is measured." />
+    </Target>
 
     <ItemGroup>
         <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />

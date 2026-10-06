@@ -16,7 +16,7 @@ def main():
     led = digitalio.DigitalInOut(board.LED)
     led.direction = digitalio.Direction.OUTPUT
 
-    uart = busio.UART(board.TX, board.RX, baudrate=115200)
+    uart = busio.UART(board.TX, board.RX, baudrate=115200, receiver_buffer_size=1)
     uart.write(b"READY\r\n")
 
     buf: uint8[1] = bytearray(1)

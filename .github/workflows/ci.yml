@@ -62,6 +62,43 @@ jobs:
         with:
           path: pymcu-arm
 
+      # The RP2350 half of the suite needs RP2350Sharp, a PRIVATE repository that
+      # GITHUB_TOKEN cannot clone. Without it every run stopped at PYMCUSIB001 before
+      # any test ran, the RP2040 tests included, although they need nothing from it.
+      #
+      # With an RP2350SHARP_TOKEN secret (read-only on RP2350Sharp) the whole suite
+      # runs. Without one the RP2040 half still runs and the RP2350 half is excluded
+      # at build time (IncludeRp2350Tests=false), and this step says so in a warning
+      # annotation and in the run summary: a partial run is never shown as a full one.
+      # A token that is set but cannot clone fails the checkout below, red.
+      - name: Check RP2350Sharp access
+        id: rp2350sharp
+        env:
+          RP2350SHARP_TOKEN: ${{ secrets.RP2350SHARP_TOKEN }}
+        run: |
+          if [ -n "$RP2350SHARP_TOKEN" ]; then
+            echo "include=true" >> "$GITHUB_OUTPUT"
+            echo "RP2350SHARP_TOKEN is set: the RP2040 and RP2350 tests will run."
+          else
+            echo "include=false" >> "$GITHUB_OUTPUT"
+            msg="RP2350 integration tests NOT RUN: they need the private RP2350Sharp repository and no RP2350SHARP_TOKEN secret is configured. Only the RP2040 tests ran. Run the RP2350 half locally with RP2350Sharp cloned beside pymcu-arm."
+            echo "::warning title=RP2350 integration tests skipped::$msg"
+            {
+              echo "### RP2350 integration tests skipped"
+              echo
+              echo "$msg"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Private sibling: tests/integration references ../../../RP2350Sharp/src/...
+      - name: Checkout RP2350Sharp
+        if: steps.rp2350sharp.outputs.include == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: PyMCU/RP2350Sharp
+          path: RP2350Sharp
+          token: ${{ secrets.RP2350SHARP_TOKEN }}
+
       # Checkout monorepo to build pymcuc (compiler binary).
       # TODO: replace with `pip install pymcu-compiler` once published to PyPI.
       - name: Checkout pymcu monorepo
@@ -132,13 +169,16 @@ jobs:
 
       - name: Restore integration test packages
         working-directory: pymcu-arm
-        run: dotnet restore tests/integration/PyMCU.IntegrationTests.csproj --nologo
+        run: |
+          dotnet restore tests/integration/PyMCU.IntegrationTests.csproj --nologo \
+            -p:IncludeRp2350Tests=${{ steps.rp2350sharp.outputs.include }}
 
       - name: Run integration tests
         working-directory: pymcu-arm
         run: |
           dotnet test tests/integration/PyMCU.IntegrationTests.csproj \
             --no-restore \
+            -p:IncludeRp2350Tests=${{ steps.rp2350sharp.outputs.include }} \
             --logger "trx;LogFileName=integration-results.trx" \
             --logger "console;verbosity=normal" \
             --blame-hang-timeout 120s \

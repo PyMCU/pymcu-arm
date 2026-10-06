@@ -54,15 +54,27 @@ public static class PymcuCompiler
     /// throwaway project under the system temp directory and built with <c>pymcu build</c>.
     /// Cached by content hash so identical programs compile once.
     /// </summary>
-    public static byte[] BuildSourceRp2040(string mainPy)
-        => BinCache.GetOrAdd("rp:src:" + Sha(mainPy), _ => new Lazy<byte[]>(() => CompileSource(mainPy))).Value;
+    public static byte[] BuildSourceRp2040(string mainPy, string? stdlib = null, string? board = null)
+        => BinCache.GetOrAdd("rp:src:" + Sha(mainPy + stdlib + board),
+            _ => new Lazy<byte[]>(() => CompileSource(mainPy, "rp2040", stdlib, board))).Value;
+
+    /// <summary>
+    /// Same as <see cref="BuildSourceRp2040"/> but targets the RP2350, for tests that need
+    /// the RP2350 sim's instruments (e.g. SioPeripheral.OnGpioChanged, which the packaged
+    /// RP2040 sim does not have).
+    /// </summary>
+    public static byte[] BuildSourceRp2350(string mainPy, string? stdlib = null, string? board = null)
+        => BinCache.GetOrAdd("rp2350:src:" + Sha(mainPy + stdlib + board),
+            _ => new Lazy<byte[]>(() => CompileSource(mainPy, "rp2350", stdlib, board))).Value;
 
     /// <summary>
     /// Directory of the throwaway project <see cref="BuildSourceRp2040"/> builds, for tests
     /// that need its artifacts (e.g. <c>dist/debug/firmware.opt.ll</c>).
     /// </summary>
-    public static string SourceDir(string mainPy)
-        => Path.Combine(Path.GetTempPath(), "pymcu-arm-gen", Sha(mainPy)[..16]);
+    public static string SourceDir(string mainPy, string target = "rp2040",
+        string? stdlib = null, string? board = null)
+        => Path.Combine(Path.GetTempPath(), "pymcu-arm-gen",
+            Sha(target + "|" + stdlib + "|" + board + "|" + mainPy)[..16]);
 
     private static string Sha(string s)
     {
@@ -70,19 +82,20 @@ public static class PymcuCompiler
         return Convert.ToHexString(bytes);
     }
 
-    private static byte[] CompileSource(string mainPy)
+    private static byte[] CompileSource(string mainPy, string target, string? stdlib, string? board)
     {
-        var dir = SourceDir(mainPy);
+        var dir = SourceDir(mainPy, target, stdlib, board);
         Directory.CreateDirectory(Path.Combine(dir, "src"));
         File.WriteAllText(Path.Combine(dir, "pyproject.toml"),
             "[project]\n" +
             "name = \"gen\"\n" +
             "version = \"0.1.0\"\n\n" +
             "[tool.pymcu]\n" +
-            "target = \"rp2040\"\n" +
+            (board == null ? $"target = \"{target}\"\n" : $"board = \"{board}\"\n") +
             "frequency = 125000000\n" +
             "sources = \"src\"\n" +
-            "entry = \"main.py\"\n");
+            "entry = \"main.py\"\n" +
+            (stdlib == null ? "" : $"stdlib = [\"{stdlib}\"]\n"));
         File.WriteAllText(Path.Combine(dir, "src", "main.py"), mainPy);
         return CompileBin(dir, "gen-" + Sha(mainPy)[..8]);
     }

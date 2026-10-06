@@ -78,6 +78,23 @@ public class DhtAsyncTests
         sim.HardFaultCount.Should().Be(0);
     }
 
+    [Test]
+    public void Report_GoesThroughTheUartObject()
+    {
+        // On a real MicroPython rp2 build print() goes to the USB REPL, not to
+        // UART0 -- so a report written with print() would never reach a UART
+        // listener on GP0. The example must emit through the uart object.
+        // This is the discriminating check the UART probe cannot make: on this
+        // compiler both spellings reach the same wire.
+        var main = Path.Combine(PymcuCompiler.ExampleDir("dht-async-rp2350"), "src", "main.py");
+        var src = File.ReadAllText(main);
+        var report = src[(src.IndexOf("async def report", StringComparison.Ordinal))..];
+        var code = string.Join('\n', report.Split('\n')
+            .Select(l => l.Split('#')[0]));
+        code.Should().Contain("uart.write", "the report must go out through the UART object");
+        code.Should().NotContain("print(", "print() would land on the USB REPL on real MicroPython rp2");
+    }
+
     private const int DhtPin = 2;
 
     // Drives one all-zeros DHT11 answer on GP2: waits for the firmware's start

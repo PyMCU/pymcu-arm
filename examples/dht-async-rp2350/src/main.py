@@ -30,8 +30,13 @@ async def report():
         if sensor.failed:
             uart.write("DHT FAIL\n")
         else:
-            print(f"T={sensor.temperature()}")
-            print(f"H={sensor.humidity()}")
+            # Written through the UART object, like a real MicroPython program:
+            # print() on an rp2 build goes to the USB REPL, not to GP0. The
+            # f-string names hold the line in a fixed buffer first.
+            t = f"T={sensor.temperature()}\n"
+            uart.write(t)
+            h = f"H={sensor.humidity()}\n"
+            uart.write(h)
         await asyncio.sleep_ms(2000)
 
 

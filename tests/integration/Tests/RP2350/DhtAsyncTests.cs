@@ -61,17 +61,43 @@ public class DhtAsyncTests
     public void ReportTask_EmitsTemperatureAndHumidityOverUart()
     {
         using var sim = Sim(out var uart);
-        // With no DHT11 wired to the emulator the sampled frame reads all-zero (a
-        // self-consistent 0/0 reading whose checksum validates), so report() prints
-        // "T=0\nH=0\n". The exact values don't matter here -- the point is that the
-        // full chain runs end to end: sample() executes the portable DHT protocol
-        // (mode flips, time_pulse_us, five _read_byte, checksum) and report() formats
-        // the result with uart.print_byte over UART0. Real T/H values are validated on
-        // hardware with a logic analyzer.
+        // The single-wire protocol needs a peer: on a dead pin every time_pulse_us
+        // times out and report() prints the "DHT FAIL" branch, so without stimulus
+        // no "T=" can ever reach the wire. Answer each measure() like a DHT11 does
+        // -- after the firmware's 18 ms start pulse releases GP2, send the ACK
+        // (80 us low, 80 us high) and 40 zero bits (50 us low + ~26 us high). The
+        // all-zero frame passes the driver's checksum, so report() prints "T=0\nH=0\n".
+        // The exact values don't matter -- the point is that the full chain runs end
+        // to end: the start pulse, both ACK waits, five _read_byte and the checksum.
+        for (int attempt = 0; attempt < 4 && !uart.Contains("T="); attempt++)
+            AnswerDht11(sim);
         sim.WaitForUart(uart, "T=", timeoutMs: 20_000).ConditionMet
             .Should().BeTrue("report() must emit a temperature line over UART0");
         sim.WaitForUart(uart, "H=", timeoutMs: 20_000).ConditionMet
             .Should().BeTrue("report() must emit a humidity line over UART0");
         sim.HardFaultCount.Should().Be(0);
+    }
+
+    private const int DhtPin = 2;
+
+    // Drives one all-zeros DHT11 answer on GP2: waits for the firmware's start
+    // pulse (GP2 driven low ~18 ms, then released to input) and answers within
+    // the driver's 1 ms time_pulse_us window.
+    private static void AnswerDht11(RP2350TestSimulation sim)
+    {
+        var sio = sim.Machine.Sio;
+        // sample() runs measure() every ~2 s; poll the OE bit every 20 ms so a
+        // start pulse is always caught.
+        for (int i = 0; i < 150 && !(sio.GetGpioOutputEnable(DhtPin) && !sio.GetGpioOut(DhtPin)); i++)
+            sim.RunMilliseconds(20);
+        // End of the start pulse: poll at 10 us so the answer lands well inside
+        // the driver's first 1 ms wait.
+        for (int i = 0; i < 200 && sio.GetGpioOutputEnable(DhtPin); i++)
+            sim.RunMicroseconds(10);
+        void Low(double us)  { sim.SetGpioInput(DhtPin, false); sim.RunMicroseconds(us); }
+        void High(double us) { sim.SetGpioInput(DhtPin, true);  sim.RunMicroseconds(us); }
+        Low(80); High(80);                               // ACK
+        for (int bit = 0; bit < 40; bit++) { Low(50); High(26); }
+        High(40);                                        // line idles high
     }
 }

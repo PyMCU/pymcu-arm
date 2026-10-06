@@ -365,6 +365,70 @@ public class ArmCompatLayerTests
             u.init(115200, 8, None, 1, tx=Pin(4), rx=Pin(5))
             """, "micropython", "bad TX pin", Pico);
 
+    [Test]
+    public void MpUart_InitTimeoutChar_KeepsTheOneFrameFloor()
+    {
+        // Upstream clamps timeout_char to at least one character (13 bit times)
+        // on every init -- at 9600 baud the floor is 13000//9600+1 = 2 ms, so
+        // init(timeout_char=0) leaves a 2 ms inter-byte window, not zero. A
+        // second byte arriving 1 ms after the first must still be read.
+        var firmware = PymcuCompiler.BuildSourceRp2040("""
+            from machine import UART
+            def main():
+                u = UART(0, 9600, timeout=2000, timeout_char=20)
+                u.init(timeout_char=0)
+                u.write("RDY\n")
+                buf = bytearray(2)
+                n = u.readinto(buf)
+                if n is None:
+                    u.write("ONE\n")
+                elif n == 2:
+                    u.write("TWO\n")
+                else:
+                    u.write("ONE\n")
+            """, "micropython", Pico);
+        var pico = new PicoSimulation(withUsbCdc: false);
+        pico.LoadFlash(firmware);
+        pico.RunUntilOutput(pico.Uart0, "RDY", timeoutMs: 20_000);
+        pico.Uart0.InjectByte(0x41);
+        pico.RunMilliseconds(1);
+        pico.Uart0.InjectByte(0x5A);
+        pico.RunUntilOutput(pico.Uart0, "TWO", timeoutMs: 20_000)
+            .Should().BeTrue("init(timeout_char=0) must keep the 2 ms one-frame floor at 9600 baud");
+    }
+
+    [Test]
+    public void MpUart_FullInit_ReFloorsTimeoutCharAgainstTheNewBaud()
+    {
+        // A full init moves the baudrate, and upstream re-computes the floor
+        // from the live baudrate: at 1200 baud it is 13000//1200+1 = 11 ms.
+        // The constructor's 115200 floor was 1 ms, so a second byte 5 ms after
+        // the first is read only if the floor was recomputed.
+        var firmware = PymcuCompiler.BuildSourceRp2040("""
+            from machine import Pin, UART
+            def main():
+                u = UART(0, 115200, timeout=2000)
+                u.init(1200, 8, None, 1, tx=Pin(0), rx=Pin(1))
+                u.write("RDY\n")
+                buf = bytearray(2)
+                n = u.readinto(buf)
+                if n is None:
+                    u.write("ONE\n")
+                elif n == 2:
+                    u.write("TWO\n")
+                else:
+                    u.write("ONE\n")
+            """, "micropython", Pico);
+        var pico = new PicoSimulation(withUsbCdc: false);
+        pico.LoadFlash(firmware);
+        pico.RunUntilOutput(pico.Uart0, "RDY", timeoutMs: 20_000);
+        pico.Uart0.InjectByte(0x41);
+        pico.RunMilliseconds(5);
+        pico.Uart0.InjectByte(0x5A);
+        pico.RunUntilOutput(pico.Uart0, "TWO", timeoutMs: 20_000)
+            .Should().BeTrue("init at 1200 baud must raise timeout_char to the new 11 ms floor");
+    }
+
     // -------------------------------------------------------- machine.Pin open-drain
 
     [Test]

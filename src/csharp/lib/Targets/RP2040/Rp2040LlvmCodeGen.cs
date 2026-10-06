@@ -87,7 +87,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         // Module-level globals.
         _globals = new HashSet<string>(program.Globals.Select(g => g.Name));
         foreach (var g in program.Globals)
-            _out.WriteLine($"@{Sym(g.Name)} = internal global {LlT(g.Type)} 0");
+            _out.WriteLine($"@{Sym(g.Name)} = internal global {LlT(g.Type)} {ZeroOf(g.Type)}");
         if (program.Globals.Count > 0) _out.WriteLine();
 
         // Named fixed-size arrays (ZCA instance backing stores, small buffers) as
@@ -300,7 +300,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                 if (_exnEnabled && func.CanFail && !func.IsInterrupt)
                     _out.WriteLine("  store volatile i8 0, ptr @__pymcu_exn_flag");
                 if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
-                else _out.WriteLine($"  ret {LlT(func.ReturnType)} 0");
+                else _out.WriteLine($"  ret {LlT(func.ReturnType)} {ZeroOf(func.ReturnType)}");
             }
         }
         _out.WriteLine("}");
@@ -1041,7 +1041,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         }
         _out.WriteLine("  store volatile i8 1, ptr @__pymcu_exn_flag");
         if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
-        else _out.WriteLine($"  ret {LlT(func.ReturnType)} 0");
+        else _out.WriteLine($"  ret {LlT(func.ReturnType)} {ZeroOf(func.ReturnType)}");
         _blockOpen = false;
     }
 
@@ -1408,6 +1408,12 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         DataType.FLOAT => "float",
         _ => "i8"
     };
+
+    // Zero of a scalar type as LLVM spells it, for a return that carries no value of
+    // its own (an error return, falling off the end) and for a global's initializer.
+    // LLVM types its constants: `float 0` is rejected ("integer constant must have
+    // integer type"), a float needs 0.0.
+    private static string ZeroOf(DataType t) => t == DataType.FLOAT ? "0.0" : "0";
 
     // LLVM block label derived from a PyMCU label name.
     private static string BlockLabel(string name) => "L." + Sym(name);

@@ -42,13 +42,13 @@ class DHTBase:
     def measure(self):
         # Start signal: hold low >= 18 ms, then pull high 20-40 us before
         # releasing to input.  The high() call leaves PORT bit = 1 so that
-        # mode(IN) enables the AVR internal pull-up (PORT=1, DDR=0).
-        self._pin.mode(Pin.OUT)
+        # init(IN) enables the AVR internal pull-up (PORT=1, DDR=0).
+        self._pin.init(Pin.OUT)
         self._pin.low()
         sleep_ms(18)
         self._pin.high()
         sleep_us(30)
-        self._pin.mode(Pin.IN)
+        self._pin.init(Pin.IN)
 
         # ACK: sensor pulls low ~80 us, then high ~80 us
         if time_pulse_us(self._pin, 0, 1000) < 0:

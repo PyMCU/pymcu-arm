@@ -28,12 +28,10 @@ async def sample():
 async def report():
     while True:
         if sensor.failed:
-            uart.println("DHT FAIL")
+            uart.write("DHT FAIL\n")
         else:
-            uart.write("T=")
-            uart.print_byte(sensor.temperature())   # "<value>\n"
-            uart.write("H=")
-            uart.print_byte(sensor.humidity())       # "<value>\n"
+            print(f"T={sensor.temperature()}")
+            print(f"H={sensor.humidity()}")
         await asyncio.sleep_ms(2000)
 
 

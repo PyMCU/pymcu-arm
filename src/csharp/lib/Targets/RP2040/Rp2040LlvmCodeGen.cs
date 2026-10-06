@@ -329,7 +329,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         switch (instr)
         {
             case Copy c:        CompileCopy(c); break;
-            case Bitcast bc:    StoreI32(LoadI32(bc.Src), bc.Dst); break;
+            case Bitcast bc:    CompileBitcast(bc); break;
             case Unary u:       CompileUnary(u); break;
             case Binary b:      CompileBinary(b); break;
             case AugAssign aa:  CompileAug(aa); break;
@@ -535,6 +535,32 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             default: throw new NotSupportedException($"unary op {u.Op}");
         }
         StoreI32(r, u.Dst);
+    }
+
+    // bitcast(T, x): reinterpret the 32 bits, never convert. A float on either side
+    // needs an LLVM bitcast; the integer path would emit `zext float`, which opt
+    // rejects. Same class on both sides is a plain copy.
+    private void CompileBitcast(Bitcast bc)
+    {
+        bool srcF = IsFloat(bc.Src), dstF = IsFloat(bc.Dst);
+        if (srcF && dstF) { StoreF32(LoadF32(bc.Src), bc.Dst); return; }
+        if (srcF)
+        {
+            string fx = LoadF32(bc.Src);
+            string r = Fresh();
+            _out.WriteLine($"  {r} = bitcast float {fx} to i32");
+            StoreI32(r, bc.Dst);
+            return;
+        }
+        if (dstF)
+        {
+            string x = LoadI32(bc.Src);
+            string r = Fresh();
+            _out.WriteLine($"  {r} = bitcast i32 {x} to float");
+            StoreF32(r, bc.Dst);
+            return;
+        }
+        StoreI32(LoadI32(bc.Src), bc.Dst);
     }
 
     private void CompileBinary(Binary b)

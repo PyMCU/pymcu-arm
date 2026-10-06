@@ -519,14 +519,17 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             return;
         }
         string x = LoadI32(u.Src);
-        string r = Fresh();
+        string r;
         switch (u.Op)
         {
-            case UnaryOp.Neg:    _out.WriteLine($"  {r} = sub i32 0, {x}"); break;
-            case UnaryOp.BitNot: _out.WriteLine($"  {r} = xor i32 {x}, -1"); break;
+            case UnaryOp.Neg:    r = Fresh(); _out.WriteLine($"  {r} = sub i32 0, {x}"); break;
+            case UnaryOp.BitNot: r = Fresh(); _out.WriteLine($"  {r} = xor i32 {x}, -1"); break;
             case UnaryOp.Not:
+                // Numbered in the order they are written: LLVM requires unnamed values
+                // to be defined in sequence, so the icmp has to take its number first.
                 string c = Fresh();
                 _out.WriteLine($"  {c} = icmp eq i32 {x}, 0");
+                r = Fresh();
                 _out.WriteLine($"  {r} = zext i1 {c} to i32");
                 break;
             default: throw new NotSupportedException($"unary op {u.Op}");

@@ -417,6 +417,12 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         switch (v)
         {
             case Constant c:   return c.Value.ToString();
+            // A literal float used directly as an ArrayStore/StoreIndirect/union-field Src
+            // (e.g. `b.v = 2.5` with no intervening arithmetic to land it in a Temporary
+            // first -- WidenToI32's own FLOAT bitcast case only ever sees a Temporary/
+            // Variable, never a bare FloatConstant). An LLVM constant-expression bitcast
+            // is valid directly as an operand, computed at compile time -- no instruction.
+            case FloatConstant fc: return $"bitcast (float {F32Lit(fc.Value)} to i32)";
             case NoneVal:      return "0";
             // "__exn_r22_capture" is the catch-dispatcher's read-only alias for the error
             // payload (physical R22 on AVR). Here the payload lives in @__pymcu_exn_code.

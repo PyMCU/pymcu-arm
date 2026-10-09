@@ -28,6 +28,21 @@ Three adaptations are made, all mechanical and applied uniformly to every probe:
    `uint8`/`uint16` cannot HOLD a 32-bit SRAM address, which is exactly why this could not be
    a same-width literal swap like GPIOR0's.
 
+4. One probe (461) imports the WHOLE chip module (`import pymcu.chips.atmega328p as chip`)
+   rather than a single register, to exercise `getattr(module, name, default)` -- PyMCU's one
+   compile-time form of getattr, which only folds when the first argument is a real module
+   import. The import is swapped for the equivalent import of the TARGET chip's own module
+   (`import pymcu.chips.rp2040 as chip`, a module that genuinely exists for this target), same
+   alias. run_cpython_for_target shims that module into sys.modules too (a GPIOR0 attribute
+   that reads 0, the same shape install_cpython_shims already gives atmega328p's), so the
+   CPython side resolves the SAME name through the SAME kind of object.
+5. One probe (583) imports TWO registers on one line (`from pymcu.chips.atmega328p import
+   GPIOR0, GPIOR1`) -- the single-name substring swap in adaptation 2 only replaced the
+   "GPIOR0" part, leaving ", GPIOR1" dangling as a syntax error that masked the probe's own
+   refusal (a `divmod` quotient that can exceed int32) behind an unrelated one. Generalized to
+   any comma-separated list of register names on that import line, each becoming its own
+   scratch byte (GPIOR1 one byte above GPIOR0's, so the two never alias).
+
 Everything else about a probe -- its logic, its expected divergences, its `# tracked:` bugs --
 is measured as found. A probe whose address literal isn't covered by one of the above (there
 are none left in the corpus as of this writing, but a future one would hit this) is still
@@ -48,6 +63,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 AVR_ORACLE_ROOT = Path.home() / "Repos" / "pymcu-avr-oraclesweep-ref"
@@ -57,10 +73,22 @@ TEST_ORACLE_FILE = AVR_ORACLE_ROOT / "tests" / "oracle" / "test_oracle.py"
 REPO_ROOT = Path(__file__).resolve().parents[2]  # pymcu-arm-oracle worktree
 RUNNER_DLL = REPO_ROOT / "build" / "oracle-runner" / "PyMCU.OracleRunner.ARM.dll"
 
-GPIOR0_IMPORT = "from pymcu.chips.atmega328p import GPIOR0"
+# Matches both the single-name form ("import GPIOR0") and 583's two-name one
+# ("import GPIOR0, GPIOR1"), or any other comma-separated list of register names on the
+# same import line -- group(1) is the raw name list, split and stripped below.
+GPIOR_IMPORT_RE = re.compile(
+    r"from pymcu\.chips\.atmega328p import ([A-Za-z0-9_, ]+)")
+
+# A probe that imports the WHOLE chip module instead of one register (461), to call
+# getattr(chip, name, default) -- PyMCU's one compile-time getattr form, which only folds
+# for a real module import, not a class. group(1) is the import alias.
+CHIP_MODULE_IMPORT_RE = re.compile(
+    r"import pymcu\.chips\.atmega328p as (\w+)")
 
 # Scratch byte near the top of each chip's SRAM, standing in for the AVR's GPIOR0 spare
 # register. Same ptr[uint8] shape as every real per-chip register table in lib/src/pymcu/chips.
+# A probe naming more than one register (583's GPIOR0, GPIOR1) gets one scratch byte per
+# name, immediately above this one -- SCRATCH_ADDR + 1, + 2, ... -- so they never alias.
 SCRATCH_ADDR = {
     "rp2040": 0x20041FF0,   # RAM 0x20000000 + 264 KiB, 16 bytes below top
     "rp2350": 0x2007FFF0,   # RAM 0x20000000 + 512 KiB, 16 bytes below top
@@ -90,6 +118,31 @@ TARGET_CHIP_INFO = {
     "rp2350": ("rp2350", "arm"),
 }
 
+# A `# expect: refuse <text>` header is worded for AVR's toolchain (binutils' as/ld), which
+# this sweep's own refusal may say correctly but differently: `@extern` on a symbol nothing
+# defines refuses the SAME way on both -- a link-time undefined reference -- but AVR's ld
+# phrases it "undefined reference to X" where LLVM's opt/llc/ld.lld (081 hits this from opt,
+# verifying the IR before llc or ld.lld ever run) say "use of undefined value". One linker's
+# wording is not a bug in the other; only the text this corpus asks for is AVR's. Probe 081
+# is the one case of this in the corpus today.
+LINKER_DIAGNOSTIC_EQUIVALENTS = {
+    "undefined reference": "use of undefined value",
+}
+
+
+def _diagnostic_matches(expected: str, log: str) -> bool:
+    # The driver's own CLI pretty-prints diagnostics wrapped to a column width that
+    # depends on the terminal/pipe it thinks it is writing to, which can -- and for 081,
+    # does -- insert a real newline INSIDE the diagnostic text itself (observed: "use of
+    # undefined" / "value '@...'" split across two lines once the temp project directory
+    # name was long enough to shift the wrap point). Collapsing all whitespace runs to a
+    # single space before comparing makes the match robust to wherever that wrap landed.
+    normalized_log = " ".join(log.split())
+    if " ".join(expected.split()) in normalized_log:
+        return True
+    equivalent = LINKER_DIAGNOSTIC_EQUIVALENTS.get(expected)
+    return equivalent is not None and " ".join(equivalent.split()) in normalized_log
+
 
 def _load_avr_oracle_module():
     spec = importlib.util.spec_from_file_location("avr_test_oracle", TEST_ORACLE_FILE)
@@ -115,12 +168,19 @@ def adapt_source(src: str, chip: str) -> str:
     # carry a `# expect: refuse :LINE:COL: ...` header anchored to the ORIGINAL file's
     # line numbers, so a replacement that changes the line count would shift every
     # diagnostic below it and turn a real match into a false "wrong diagnostic".
-    if GPIOR0_IMPORT in src:
-        replacement = (
-            f"from pymcu.types import ptr, uint8; "
-            f"GPIOR0: ptr[uint8] = ptr({hex(SCRATCH_ADDR[chip])})"
+    def gpior_sub(m: re.Match) -> str:
+        names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+        decls = "; ".join(
+            f"{name}: ptr[uint8] = ptr({hex(SCRATCH_ADDR[chip] + i)})"
+            for i, name in enumerate(names)
         )
-        src = src.replace(GPIOR0_IMPORT, replacement)
+        return f"from pymcu.types import ptr, uint8; {decls}"
+
+    src = GPIOR_IMPORT_RE.sub(gpior_sub, src)
+
+    # 461: `import pymcu.chips.atmega328p as X` -> the equivalent import of the real
+    # target chip module, same alias. run_cpython_for_target shims that module in too.
+    src = CHIP_MODULE_IMPORT_RE.sub(rf"import pymcu.chips.{chip} as \1", src)
 
     # 196: BASE is a direct 16-bit pointer base (`ptr(BASE + off)`), so the replacement
     # just needs a wider type and a real address -- the arithmetic around it is untouched.
@@ -157,6 +217,15 @@ def run_cpython_for_target(src: str, probe_name: str, chip_name: str, arch: str)
     chip_mod.__CHIP__.name = chip_name
     chip_mod.__CHIP__.arch = arch
     sys.modules["pymcu.chips"].__CHIP__ = chip_mod.__CHIP__
+
+    # Adaptation 4 (461): a fake pymcu.chips.<target> module, GPIOR0 shimmed the same shape
+    # as atmega328p's own (install_cpython_shims above), so `import pymcu.chips.rp2040 as
+    # chip; getattr(chip, "GPIOR0", None)` resolves to the SAME kind of object the firmware
+    # build's adapted source reads through its scratch ptr.
+    target_chip_mod = types.ModuleType(f"pymcu.chips.{chip_name}")
+    target_chip_mod.GPIOR0 = types.SimpleNamespace(value=chip_mod.GPIOR0.value)
+    sys.modules[f"pymcu.chips.{chip_name}"] = target_chip_mod
+
     globals_ = {"__name__": "__main__", "__file__": str(PROBES_DIR / f"{probe_name}.py")}
     try:
         with contextlib.redirect_stdout(buf):
@@ -221,7 +290,7 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
 
     if expectation.kind == "refuse":
         if returncode != 0:
-            if expectation.diagnostic and expectation.diagnostic not in log:
+            if expectation.diagnostic and not _diagnostic_matches(expectation.diagnostic, log):
                 record["outcome"] = "refused_wrong_diagnostic"
                 record["detail"] = log.strip().splitlines()[-1][:200] if log.strip() else ""
             else:

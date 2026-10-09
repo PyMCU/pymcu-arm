@@ -69,6 +69,17 @@ var verboseOpt = new Option<bool>("--verbose", "-v")
     DefaultValueFactory = _ => false
 };
 
+// RFC 0009 capability flag: the driver probes --help for this before handing over a
+// .mir whose functions carry Optional/Union return tags. The backend packs/unpacks the
+// tag whenever a function's ReturnMembers is non-empty regardless of this flag, so it
+// changes nothing here -- it exists so the probe can tell this binary from one that
+// would drop the tag silently. Mirrors pymcuc-avr's own --return-tags (src/csharp/cli/
+// Program.cs there).
+var returnTagsOpt = new Option<bool>("--return-tags")
+{
+    Description = "Declare support for RFC 0009 Optional/Union return tags (payload + member byte)"
+};
+
 var rootCmd = new RootCommand("pymcuc-arm - PyMCU RP2040 (LLVM IR) backend runner");
 rootCmd.Arguments.Add(irFileArg);
 rootCmd.Options.Add(outputOpt);
@@ -78,6 +89,7 @@ rootCmd.Options.Add(configOpt);
 rootCmd.Options.Add(resetVecOpt);
 rootCmd.Options.Add(intVecOpt);
 rootCmd.Options.Add(verboseOpt);
+rootCmd.Options.Add(returnTagsOpt);
 
 rootCmd.SetAction(pr =>
 {

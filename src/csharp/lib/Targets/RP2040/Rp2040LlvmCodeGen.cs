@@ -17,8 +17,9 @@
 // Covered: arithmetic (incl. f32 -- RP2040 lowers to __aeabi_f* over the bootrom
 // fast-float library, RP2350 to the M33 FPU in softfp mode), MMIO, bit ops,
 // control flow, direct calls, arrays, flash tables, exceptions (portable T-flag
-// model) and operand-form inline asm. GC and vtables throw NotSupportedException
-// with a clear message.
+// model), operand-form inline asm, and the GC heap (list[T]/array.array --
+// mark-and-compact with a shadow stack, ported from AVR's gc_runtime.S; see
+// EmitGcRuntime). Vtables throw NotSupportedException with a clear message.
 
 using System.Text;
 using PyMCU.Common.Models;
@@ -187,6 +188,25 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                             usedCodes.Add(ce.Value);
                 EmitExnRuntime(usedCodes);
             }
+        }
+
+        // GC heap (list[T]/array.array): mirrors AVR's own gate (program.NeedsGc, set by
+        // the shared GcAnalysisPhase once any GcAlloc/GcRoot/GcUnroot or GC_REF-typed
+        // value reaches IR). A program that never uses a growable list never emits any
+        // of this, exactly as AVR costs it nothing either.
+        if (program.NeedsGc)
+        {
+            // Shadow-stack sizing: the exact formula AvrCodeGen.cs uses (EmitGcSramLayout's
+            // caller) -- the language has no recursion, so the program's total GcRoot count,
+            // plus every GC_REF global (seeded once, never popped), bounds the live shadow-
+            // stack depth. AVR clamps to [2, 128] 2-byte slots; this backend's slots are
+            // 4 bytes (a full i32 address), and the ceiling is raised to 1024 -- AVR's 128
+            // comes from its 2 KiB of SRAM, not from anything inherent to the algorithm.
+            int ssSlots = Math.Clamp(
+                program.Functions.Sum(f => f.Body.Count(i => i is GcRoot))
+                + program.Globals.Count(g => g.Type == DataType.GC_REF),
+                1, 1024);
+            EmitGcRuntime(ssSlots);
         }
 
         // Emit only functions reachable from a root (main / interrupt / exported).
@@ -390,6 +410,10 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             case BranchOnError boe: CompileBranchOnError(boe); break;
 
             case InlineAsm ia:  CompileInlineAsm(ia); break;
+
+            case GcAlloc ga:  CompileGcAlloc(ga);  break;
+            case GcRoot gr:   CompileGcRoot(gr);   break;
+            case GcUnroot gu: CompileGcUnroot(gu); break;
 
             case VirtualCall vc:
                 throw new NotSupportedException(
@@ -1313,6 +1337,335 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine();
     }
 
+    // ── GC heap (list[T]/array.array): mark-and-compact with a shadow stack ────
+    //
+    // Ported from AVR's gc_runtime.S, re-expressed as LLVM IR rather than hand-written
+    // assembly -- LLVM does its own register allocation/instruction selection for these
+    // functions, so this needs to state the ALGORITHM faithfully, not transliterate
+    // instructions. No ref-bearing payload tracing yet (list[list[T]] aliasing): that is
+    // a separate commit, same as the plan's phase split.
+    //
+    // Object header (4 bytes, not AVR's 2 -- the size field is 16-bit here, since this
+    // target has far more RAM than a 255-byte ceiling would ever need, and 4 bytes keeps
+    // every payload 4-byte aligned without a separate padding field):
+    //   byte 0  mark/flags : bit7 = live (set by mark, cleared by compact's copy);
+    //                        bit6 = payload holds GC_REFs (list[list[T]]'s own
+    //                        allocations set this; the trace pass that reads it is not
+    //                        implemented yet, so it is otherwise inert for now)
+    //   byte 1  reserved (0)
+    //   bytes 2-3  payload size, u16 LE
+    //   bytes 4..  payload (always 4-byte aligned: gc_alloc rounds header+payload up to
+    //              the next multiple of 4 before bumping the pointer, same as AVR rounds
+    //              nothing because its header is fixed at exactly 2)
+    // user_ptr (the value a GC_REF variable holds) = header address + 4.
+    //
+    // Shadow stack: an array of ABSOLUTE ADDRESSES of GC_REF variable SLOTS (not their
+    // values) currently live, pushed by GcRoot at scope entry and popped by GcUnroot at
+    // exit -- exactly AVR's model (CompileGcRoot/CompileGcUnroot below), sized once per
+    // program by Compile() from the IR's own GcRoot count (no call-graph/recursion
+    // analysis needed: PyMCU has no recursion, so the total count bounds the live depth).
+    //
+    // Self-initialising: @__pymcu_gc_heap_top starts at its zero-initialiser (never a
+    // real heap address -- RAM starts at 0x20000000) and __pymcu_gc_alloc treats 0 as
+    // "not yet seeded from @__heap_start", so no explicit gc_init() call needs injecting
+    // into every program's main() prologue the way AVR's does.
+    private void EmitGcRuntime(int ssSlots)
+    {
+        int ssBytes = ssSlots * 4;
+        _out.WriteLine("; ── GC heap runtime (list[T]/array.array) ──────────────────────────────────");
+        _out.WriteLine("@__pymcu_gc_heap_top = internal global i32 0");
+        _out.WriteLine("@__pymcu_gc_ss_top = internal global i32 0");
+        _out.WriteLine($"@__pymcu_gc_ss_base = internal global [{ssBytes} x i8] zeroinitializer");
+        _out.WriteLine("@__heap_start = external global i8");
+        _out.WriteLine("@__heap_end = external global i8");
+        _out.WriteLine();
+
+        // __pymcu_gc_root_push / _pop: GcRoot/GcUnroot's own runtime half.
+        _out.WriteLine("define internal void @__pymcu_gc_root_push(i32 %addr) {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %top = load i32, ptr @__pymcu_gc_ss_top");
+        _out.WriteLine("  %byteoff = mul i32 %top, 4");
+        _out.WriteLine("  %slotptr = getelementptr i8, ptr @__pymcu_gc_ss_base, i32 %byteoff");
+        _out.WriteLine("  store i32 %addr, ptr %slotptr");
+        _out.WriteLine("  %newtop = add i32 %top, 1");
+        _out.WriteLine("  store i32 %newtop, ptr @__pymcu_gc_ss_top");
+        _out.WriteLine("  ret void");
+        _out.WriteLine("}");
+        _out.WriteLine();
+        _out.WriteLine("define internal void @__pymcu_gc_root_pop() {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %top = load i32, ptr @__pymcu_gc_ss_top");
+        _out.WriteLine("  %newtop = sub i32 %top, 1");
+        _out.WriteLine("  store i32 %newtop, ptr @__pymcu_gc_ss_top");
+        _out.WriteLine("  ret void");
+        _out.WriteLine("}");
+        _out.WriteLine();
+
+        // __pymcu_gc_mark: walk the shadow stack; set bit7 on every reachable header.
+        _out.WriteLine("define internal void @__pymcu_gc_mark() {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %sstop = load i32, ptr @__pymcu_gc_ss_top");
+        _out.WriteLine("  %heaptop0 = load i32, ptr @__pymcu_gc_heap_top");
+        _out.WriteLine("  %hs = ptrtoint ptr @__heap_start to i32");
+        _out.WriteLine("  br label %loophead");
+        _out.WriteLine("loophead:");
+        _out.WriteLine("  %i = phi i32 [ 0, %entry ], [ %inext, %loopnext ]");
+        _out.WriteLine("  %cont = icmp slt i32 %i, %sstop");
+        _out.WriteLine("  br i1 %cont, label %loopbody, label %loopend");
+        _out.WriteLine("loopbody:");
+        _out.WriteLine("  %byteoff = mul i32 %i, 4");
+        _out.WriteLine("  %slotptr = getelementptr i8, ptr @__pymcu_gc_ss_base, i32 %byteoff");
+        _out.WriteLine("  %addr = load i32, ptr %slotptr");
+        _out.WriteLine("  %addrptr = inttoptr i32 %addr to ptr");
+        _out.WriteLine("  %val = load i32, ptr %addrptr");
+        _out.WriteLine("  %isnull = icmp eq i32 %val, 0");
+        _out.WriteLine("  br i1 %isnull, label %loopnext, label %checklow");
+        _out.WriteLine("checklow:");
+        _out.WriteLine("  %abovestart = icmp uge i32 %val, %hs");
+        _out.WriteLine("  br i1 %abovestart, label %checkhigh, label %loopnext");
+        _out.WriteLine("checkhigh:");
+        _out.WriteLine("  %belowtop = icmp ult i32 %val, %heaptop0");
+        _out.WriteLine("  br i1 %belowtop, label %domark, label %loopnext");
+        _out.WriteLine("domark:");
+        _out.WriteLine("  %hdraddr = sub i32 %val, 4");
+        _out.WriteLine("  %hdrptr = inttoptr i32 %hdraddr to ptr");
+        _out.WriteLine("  %oldmark = load i8, ptr %hdrptr");
+        _out.WriteLine("  %newmark = or i8 %oldmark, -128");
+        _out.WriteLine("  store i8 %newmark, ptr %hdrptr");
+        _out.WriteLine("  br label %loopnext");
+        _out.WriteLine("loopnext:");
+        _out.WriteLine("  %inext = add i32 %i, 1");
+        _out.WriteLine("  br label %loophead");
+        _out.WriteLine("loopend:");
+        _out.WriteLine("  ret void");
+        _out.WriteLine("}");
+        _out.WriteLine();
+
+        // __pymcu_gc_fixup: rewrite every shadow-stack slot currently holding %old to
+        // %new -- called whenever compact actually moves a live object.
+        _out.WriteLine("define internal void @__pymcu_gc_fixup(i32 %old, i32 %new) {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %sstop = load i32, ptr @__pymcu_gc_ss_top");
+        _out.WriteLine("  br label %loophead");
+        _out.WriteLine("loophead:");
+        _out.WriteLine("  %i = phi i32 [ 0, %entry ], [ %inext, %loopnext ]");
+        _out.WriteLine("  %cont = icmp slt i32 %i, %sstop");
+        _out.WriteLine("  br i1 %cont, label %loopbody, label %loopend");
+        _out.WriteLine("loopbody:");
+        _out.WriteLine("  %byteoff = mul i32 %i, 4");
+        _out.WriteLine("  %slotptr = getelementptr i8, ptr @__pymcu_gc_ss_base, i32 %byteoff");
+        _out.WriteLine("  %addr = load i32, ptr %slotptr");
+        _out.WriteLine("  %addrptr = inttoptr i32 %addr to ptr");
+        _out.WriteLine("  %val = load i32, ptr %addrptr");
+        _out.WriteLine("  %match = icmp eq i32 %val, %old");
+        _out.WriteLine("  br i1 %match, label %dofixup, label %loopnext");
+        _out.WriteLine("dofixup:");
+        _out.WriteLine("  store i32 %new, ptr %addrptr");
+        _out.WriteLine("  br label %loopnext");
+        _out.WriteLine("loopnext:");
+        _out.WriteLine("  %inext = add i32 %i, 1");
+        _out.WriteLine("  br label %loophead");
+        _out.WriteLine("loopend:");
+        _out.WriteLine("  ret void");
+        _out.WriteLine("}");
+        _out.WriteLine();
+
+        // __pymcu_gc_compact: one linear sweep, live objects copied toward heap_start
+        // (read cursor %read always >= write cursor %write), dead ones simply skipped --
+        // AVR's own _gc_do_compact, same shape. A 4-byte-at-a-time copy loop instead of a
+        // memcpy/memmove intrinsic: every object (header included) is a multiple of 4
+        // bytes by construction (gc_alloc's own rounding), and this keeps the runtime
+        // free of any intrinsic declaration this backend has never needed before.
+        _out.WriteLine("define internal void @__pymcu_gc_compact() {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %hs = ptrtoint ptr @__heap_start to i32");
+        _out.WriteLine("  %topcapture = load i32, ptr @__pymcu_gc_heap_top");
+        _out.WriteLine("  br label %loophead");
+        _out.WriteLine("loophead:");
+        _out.WriteLine("  %read = phi i32 [ %hs, %entry ], [ %readnext, %loopnext ]");
+        _out.WriteLine("  %write = phi i32 [ %hs, %entry ], [ %writenext, %loopnext ]");
+        _out.WriteLine("  %cont = icmp ult i32 %read, %topcapture");
+        _out.WriteLine("  br i1 %cont, label %loopbody, label %loopend");
+        _out.WriteLine("loopbody:");
+        _out.WriteLine("  %hdrptr = inttoptr i32 %read to ptr");
+        _out.WriteLine("  %mark = load i8, ptr %hdrptr");
+        _out.WriteLine("  %sizeptr = getelementptr i8, ptr %hdrptr, i32 2");
+        _out.WriteLine("  %size16 = load i16, ptr %sizeptr");
+        _out.WriteLine("  %size = zext i16 %size16 to i32");
+        _out.WriteLine("  %t0 = add i32 %size, 7");
+        _out.WriteLine("  %total = and i32 %t0, -4");
+        _out.WriteLine("  %bit7 = and i8 %mark, -128");
+        _out.WriteLine("  %ismarked = icmp ne i8 %bit7, 0");
+        _out.WriteLine("  br i1 %ismarked, label %livepath, label %deadpath");
+        _out.WriteLine("livepath:");
+        _out.WriteLine("  %olduser = add i32 %read, 4");
+        _out.WriteLine("  %newuser = add i32 %write, 4");
+        _out.WriteLine("  %moved = icmp ne i32 %olduser, %newuser");
+        _out.WriteLine("  br i1 %moved, label %dofix, label %copyit");
+        _out.WriteLine("dofix:");
+        _out.WriteLine("  call void @__pymcu_gc_fixup(i32 %olduser, i32 %newuser)");
+        _out.WriteLine("  br label %copyit");
+        _out.WriteLine("copyit:");
+        _out.WriteLine("  br label %copyloophead");
+        _out.WriteLine("copyloophead:");
+        _out.WriteLine("  %ci = phi i32 [ 0, %copyit ], [ %cinext, %copyloopbody ]");
+        _out.WriteLine("  %ccont = icmp ult i32 %ci, %total");
+        _out.WriteLine("  br i1 %ccont, label %copyloopbody, label %copyloopend");
+        _out.WriteLine("copyloopbody:");
+        _out.WriteLine("  %srcaddr = add i32 %read, %ci");
+        _out.WriteLine("  %dstaddr = add i32 %write, %ci");
+        _out.WriteLine("  %srcp = inttoptr i32 %srcaddr to ptr");
+        _out.WriteLine("  %dstp = inttoptr i32 %dstaddr to ptr");
+        _out.WriteLine("  %word = load i32, ptr %srcp");
+        _out.WriteLine("  store i32 %word, ptr %dstp");
+        _out.WriteLine("  %cinext = add i32 %ci, 4");
+        _out.WriteLine("  br label %copyloophead");
+        _out.WriteLine("copyloopend:");
+        _out.WriteLine("  %dstmarkptr = inttoptr i32 %write to ptr");
+        _out.WriteLine("  %dstmark = load i8, ptr %dstmarkptr");
+        _out.WriteLine("  %clearedmark = and i8 %dstmark, 127");
+        _out.WriteLine("  store i8 %clearedmark, ptr %dstmarkptr");
+        _out.WriteLine("  %writeafterlive = add i32 %write, %total");
+        _out.WriteLine("  br label %loopnext");
+        _out.WriteLine("deadpath:");
+        _out.WriteLine("  br label %loopnext");
+        _out.WriteLine("loopnext:");
+        _out.WriteLine("  %writenext = phi i32 [ %writeafterlive, %copyloopend ], [ %write, %deadpath ]");
+        _out.WriteLine("  %readnext = add i32 %read, %total");
+        _out.WriteLine("  br label %loophead");
+        _out.WriteLine("loopend:");
+        _out.WriteLine("  store i32 %write, ptr @__pymcu_gc_heap_top");
+        _out.WriteLine("  ret void");
+        _out.WriteLine("}");
+        _out.WriteLine();
+
+        // __pymcu_gc_collect: mark then compact, with interrupts held off for the
+        // duration (AVR's own CLI/SREG-restore discipline: a collection in progress that
+        // an ISR interrupts mid-compaction would see a half-moved heap and corrupt it).
+        // PRIMASK is saved and restored verbatim rather than unconditionally re-enabled,
+        // so a collect invoked with interrupts already off (there is no such call site
+        // yet, but __pymcu_gc_alloc's retry-after-collect is reachable from anywhere)
+        // stays off.
+        _out.WriteLine("define internal void @__pymcu_gc_collect() {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %primask = call i32 asm sideeffect \"mrs $0, PRIMASK\", \"=r\"()");
+        _out.WriteLine("  call void asm sideeffect \"cpsid i\", \"~{memory}\"()");
+        _out.WriteLine("  call void @__pymcu_gc_mark()");
+        _out.WriteLine("  call void @__pymcu_gc_compact()");
+        _out.WriteLine("  call void asm sideeffect \"msr PRIMASK, $0\", \"r,~{memory}\"(i32 %primask)");
+        _out.WriteLine("  ret void");
+        _out.WriteLine("}");
+        _out.WriteLine();
+
+        // __pymcu_gc_alloc_inner: one bump-allocation attempt. Returns the user_ptr
+        // (header + 4), or 0 if %size plus the 4-byte header, rounded up to a multiple of
+        // 4, would not fit before @__heap_end.
+        _out.WriteLine("define internal i32 @__pymcu_gc_alloc_inner(i32 %size, i1 %refs) {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %t0 = add i32 %size, 7");
+        _out.WriteLine("  %total = and i32 %t0, -4");
+        _out.WriteLine("  %top = load i32, ptr @__pymcu_gc_heap_top");
+        _out.WriteLine("  %newtop = add i32 %top, %total");
+        _out.WriteLine("  %he = ptrtoint ptr @__heap_end to i32");
+        _out.WriteLine("  %fits = icmp ule i32 %newtop, %he");
+        _out.WriteLine("  br i1 %fits, label %ok, label %fail");
+        _out.WriteLine("ok:");
+        _out.WriteLine("  %hdrptr = inttoptr i32 %top to ptr");
+        _out.WriteLine("  %flagsbyte = select i1 %refs, i8 64, i8 0");
+        _out.WriteLine("  store i8 %flagsbyte, ptr %hdrptr");
+        _out.WriteLine("  %padptr = getelementptr i8, ptr %hdrptr, i32 1");
+        _out.WriteLine("  store i8 0, ptr %padptr");
+        _out.WriteLine("  %sizeptr = getelementptr i8, ptr %hdrptr, i32 2");
+        _out.WriteLine("  %size16 = trunc i32 %size to i16");
+        _out.WriteLine("  store i16 %size16, ptr %sizeptr");
+        _out.WriteLine("  store i32 %newtop, ptr @__pymcu_gc_heap_top");
+        _out.WriteLine("  %userptr = add i32 %top, 4");
+        _out.WriteLine("  ret i32 %userptr");
+        _out.WriteLine("fail:");
+        _out.WriteLine("  ret i32 0");
+        _out.WriteLine("}");
+        _out.WriteLine();
+
+        // gc_list_fixup: IRGenerator emits a bare Call to this exact name directly
+        // (Call.cs, list append's realloc path) -- not through GcAlloc/GcRoot/GcUnroot,
+        // so CompileCall's ordinary unknown-callee fallback (VOID return, UINT32-shaped
+        // i32 args) reaches it like any other external symbol; it only needs to exist
+        // with this exact name and these two i32 parameters. Called after append copies
+        // a grown list's backing buffer to a new, larger allocation: every OTHER GC_REF
+        // variable aliasing the list (not just the one that grew it -- Python list
+        // aliasing semantics) must also observe the new address, the same rewrite
+        // __pymcu_gc_fixup already does for compaction.
+        _out.WriteLine("define void @gc_list_fixup(i32 %old, i32 %new) {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  call void @__pymcu_gc_fixup(i32 %old, i32 %new)");
+        _out.WriteLine("  ret void");
+        _out.WriteLine("}");
+        _out.WriteLine();
+
+        // __pymcu_gc_alloc: the public entry point GcAlloc lowers to. Self-initialises
+        // @__pymcu_gc_heap_top from @__heap_start on its very first call (it starts at
+        // its zero-initialiser, never a real heap address); on OOM, collects once and
+        // retries exactly once more, same as AVR's gc_alloc -- a second failure is
+        // permanent for this request and returns 0 (the caller's own job to check, same
+        // as every GcAlloc call site in IRGenerator already does since PyMCU-gcnull).
+        _out.WriteLine("define i32 @__pymcu_gc_alloc(i32 %size, i1 %refs) {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %top0 = load i32, ptr @__pymcu_gc_heap_top");
+        _out.WriteLine("  %needinit = icmp eq i32 %top0, 0");
+        _out.WriteLine("  br i1 %needinit, label %doinit, label %tryalloc");
+        _out.WriteLine("doinit:");
+        _out.WriteLine("  %hs = ptrtoint ptr @__heap_start to i32");
+        _out.WriteLine("  store i32 %hs, ptr @__pymcu_gc_heap_top");
+        _out.WriteLine("  br label %tryalloc");
+        _out.WriteLine("tryalloc:");
+        _out.WriteLine("  %r1 = call i32 @__pymcu_gc_alloc_inner(i32 %size, i1 %refs)");
+        _out.WriteLine("  %ok1 = icmp ne i32 %r1, 0");
+        _out.WriteLine("  br i1 %ok1, label %done, label %collect");
+        _out.WriteLine("collect:");
+        _out.WriteLine("  call void @__pymcu_gc_collect()");
+        _out.WriteLine("  %r2 = call i32 @__pymcu_gc_alloc_inner(i32 %size, i1 %refs)");
+        _out.WriteLine("  br label %done");
+        _out.WriteLine("done:");
+        _out.WriteLine("  %result = phi i32 [ %r1, %tryalloc ], [ %r2, %collect ]");
+        _out.WriteLine("  ret i32 %result");
+        _out.WriteLine("}");
+        _out.WriteLine();
+    }
+
+    // GcAlloc: call __pymcu_gc_alloc(size, refs); store the returned user_ptr (0 on OOM
+    // -- the IR's own caller already checks this, same as every GcAlloc site does since
+    // PyMCU-gcnull) in Dst.
+    private void CompileGcAlloc(GcAlloc ga)
+    {
+        string size = LoadI32(ga.Size);
+        string refsBit = ga.Refs ? "true" : "false";
+        string r = Fresh();
+        _out.WriteLine($"  {r} = call i32 @__pymcu_gc_alloc(i32 {size}, i1 {refsBit})");
+        StoreI32(r, ga.Dst);
+    }
+
+    // GcRoot: push the absolute address of the GC_REF variable's OWN SLOT (not its
+    // value) onto the shadow stack, so the collector can load/rewrite it in place.
+    private void CompileGcRoot(GcRoot gr)
+    {
+        string varName = gr.Var switch
+        {
+            Variable v  => v.Name,
+            Temporary t => t.Name,
+            _           => throw new NotSupportedException("GcRoot: expected Variable or Temporary")
+        };
+        string addr = Fresh();
+        _out.WriteLine($"  {addr} = ptrtoint ptr {SlotPtr(varName)} to i32");
+        _out.WriteLine($"  call void @__pymcu_gc_root_push(i32 {addr})");
+    }
+
+    // GcUnroot: pop one shadow-stack entry (LIFO, matching the frontend's own
+    // push/pop nesting -- the variable itself is never consulted, same as AVR).
+    private void CompileGcUnroot(GcUnroot gu)
+    {
+        _out.WriteLine("  call void @__pymcu_gc_root_pop()");
+    }
+
     private void CompileInlineAsm(InlineAsm ia)
     {
         string escaped = ia.Code.Replace("\\", "\\\\").Replace("\"", "\\22");
@@ -1553,6 +1906,9 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             case Call call: foreach (var a in call.Args) yield return a; yield return call.Dst; break;
             case SignalError se: yield return se.Code; break;
             case InlineAsm ia: if (ia.Operands != null) foreach (var a in ia.Operands) yield return a; break;
+            case GcAlloc ga: yield return ga.Size; yield return ga.Dst; break;
+            case GcRoot gr: yield return gr.Var; break;
+            case GcUnroot gu: yield return gu.Var; break;
         }
     }
 

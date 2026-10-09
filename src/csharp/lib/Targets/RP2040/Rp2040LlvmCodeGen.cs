@@ -1382,12 +1382,6 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine($"@__pymcu_gc_ss_base = internal global [{ssBytes} x i8] zeroinitializer");
         _out.WriteLine("@__heap_start = external global i8");
         _out.WriteLine("@__heap_end = external global i8");
-        // A collection's own count, read directly from SRAM by address in tests (there
-        // is no PyMCU-level builtin that exposes it) to confirm a stress test actually
-        // forced gc_collect to run, rather than inferring it from the program's output
-        // alone -- not internal/private so it keeps a fixed, discoverable symbol name
-        // instead of whatever opt's internalizer would otherwise rename it to.
-        _out.WriteLine("@__pymcu_gc_collect_count = global i32 0");
         _out.WriteLine();
 
         // __pymcu_gc_root_push / _pop: GcRoot/GcUnroot's own runtime half.
@@ -1649,8 +1643,6 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         // restored verbatim rather than unconditionally re-enabled, so a collect invoked
         // with interrupts already off (there is no such call site yet, but
         // __pymcu_gc_alloc's retry-after-collect is reachable from anywhere) stays off.
-        // The count is bumped outside the critical section -- tests read it, nothing in
-        // the runtime itself depends on its value, so there is nothing to race.
         _out.WriteLine("define internal void @__pymcu_gc_collect() {");
         _out.WriteLine("entry:");
         _out.WriteLine("  %primask = call i32 asm sideeffect \"mrs $0, PRIMASK\", \"=r\"()");
@@ -1659,9 +1651,6 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         if (needsRefTrace) _out.WriteLine("  call void @__pymcu_gc_trace_refs()");
         _out.WriteLine("  call void @__pymcu_gc_compact()");
         _out.WriteLine("  call void asm sideeffect \"msr PRIMASK, $0\", \"r,~{memory}\"(i32 %primask)");
-        _out.WriteLine("  %cnt = load i32, ptr @__pymcu_gc_collect_count");
-        _out.WriteLine("  %cntnext = add i32 %cnt, 1");
-        _out.WriteLine("  store i32 %cntnext, ptr @__pymcu_gc_collect_count");
         _out.WriteLine("  ret void");
         _out.WriteLine("}");
         _out.WriteLine();

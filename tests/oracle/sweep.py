@@ -39,7 +39,7 @@ import tempfile
 import time
 from pathlib import Path
 
-AVR_ORACLE_ROOT = Path.home() / "Repos" / "pymcu-avr"
+AVR_ORACLE_ROOT = Path.home() / "Repos" / "pymcu-avr-oraclesweep-ref"
 PROBES_DIR = AVR_ORACLE_ROOT / "tests" / "oracle" / "probes"
 TEST_ORACLE_FILE = AVR_ORACLE_ROOT / "tests" / "oracle" / "test_oracle.py"
 

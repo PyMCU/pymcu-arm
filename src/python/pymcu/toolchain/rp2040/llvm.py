@@ -266,6 +266,19 @@ class Rp2040LlvmToolchain(ExternalToolchain):
                    "-O2", "-filetype=obj"]
         if is_rp2350:
             llc_cmd += ["-float-abi=soft"]
+        else:
+            # thumbv6m (Cortex-M0/M0+) has no TBB/TBH hardware jump-table
+            # instruction (ARMv7-M+ only), so llc falls back to a hand-rolled
+            # "ADD Rd, PC; LDRB; LSL; ADD PC, Rd" sequence for a dense `switch`.
+            # At -O2 that sequence is miscompiled on this target: the exception
+            # args-print dispatch (#550), a 4-site `switch i8` SimplifyCFG builds
+            # from the per-raise-site if/else chain, landed in the wrong case --
+            # confirmed by bisecting opt/llc optimization levels independently
+            # (opt -O2 + llc -O0 is correct, opt -O0 + llc -O2 is correct, both
+            # at -O2 together is not) and by raising this same threshold, which
+            # makes llc fall back to a compare chain and fixes it. RP2350
+            # (cortex-m33, thumbv8m) keeps real jump tables -- it has TBB/TBH.
+            llc_cmd += ["-min-jump-table-entries=1000000"]
         llc_cmd += [str(opt_ll), "-o", str(fw_o)]
         self._run(llc_cmd)
 
@@ -348,14 +361,19 @@ class Rp2040LlvmToolchain(ExternalToolchain):
         opt_ll = out_dir / (ll_file.stem + ".opt.ll")
         self._run([opt, "-O2", "-S", str(ll_file), "-o", str(opt_ll)])
 
-        self._run([
+        natmod_llc_cmd = [
             llc, f"-mtriple={triple}", f"-mcpu={cpu}",
             "-O2", "-filetype=obj",
             # The one flag the whole mode turns on.
             "-relocation-model=pic",
-            *extra,
-            str(opt_ll), "-o", str(obj),
-        ])
+        ]
+        if triple.startswith("thumbv6m"):
+            # Same llc jump-table miscompile as assemble() below -- see the
+            # comment there (#550). armv6m (rp2040's native-module arch) has
+            # no TBB/TBH either, so it hits the same broken fallback sequence.
+            natmod_llc_cmd += ["-min-jump-table-entries=1000000"]
+        natmod_llc_cmd += [*extra, str(opt_ll), "-o", str(obj)]
+        self._run(natmod_llc_cmd)
 
         # .ARM.exidx is unwind data for a runtime that is not there. mpy_ld.py skips
         # it (it is neither PROGBITS nor NOBITS), but an object that carries sections

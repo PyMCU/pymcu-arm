@@ -271,7 +271,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
         // Signature.
         var sig = new StringBuilder();
-        sig.Append($"define {LlT(func.ReturnType)} @{EmitSym(func)}(");
+        sig.Append($"define {ReturnLlT(func)} @{EmitSym(func)}(");
         for (int i = 0; i < func.Params.Count; i++)
         {
             if (i > 0) sig.Append(", ");
@@ -315,6 +315,8 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                 if (_exnEnabled && func.CanFail && !func.IsInterrupt)
                     _out.WriteLine("  store volatile i8 0, ptr @__pymcu_exn_flag");
                 if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
+                else if (func.ReturnMembers is { Count: > 0 })
+                    _out.WriteLine($"  ret {TaggedReturnLlT} {TaggedReturnZero}");
                 else _out.WriteLine($"  ret {LlT(func.ReturnType)} {ZeroOf(func.ReturnType)}");
             }
         }
@@ -1041,7 +1043,24 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         // by marking the call `notail`.
         string tailMod = _nakedFns.Contains(callee) ? "notail " : "";
 
-        if (ret == DataType.VOID)
+        if (call.TagDst != null)
+        {
+            // RFC 0009: callee's declared ReturnMembers made this a tagged call --
+            // the LLVM return type is the uniform `{ i32, i8 }`, not the callee's own
+            // scalar/float type (`ret` here, read from _returnTypes, is still that
+            // scalar/float type -- it is the widest member's, and tells us how to
+            // reinterpret the payload word).
+            string r = Fresh();
+            _out.WriteLine($"  {r} = {tailMod}call {TaggedReturnLlT} @{Sym(callee)}({argList})");
+            string payload = Fresh();
+            _out.WriteLine($"  {payload} = extractvalue {TaggedReturnLlT} {r}, 0");
+            string tagv = Fresh();
+            _out.WriteLine($"  {tagv} = extractvalue {TaggedReturnLlT} {r}, 1");
+            StoreTaggedPayload(payload, call.Dst, ret);
+            if (call.TagDst is not NoneVal)
+                StoreI32(WidenToI32(tagv, DataType.UINT8), call.TagDst);
+        }
+        else if (ret == DataType.VOID)
         {
             _out.WriteLine($"  {tailMod}call void @{Sym(callee)}({argList})");
         }
@@ -1065,7 +1084,21 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         // CanFail, and must not clobber a main-context pending error).
         if (_exnEnabled && func.CanFail && !func.IsInterrupt)
             _out.WriteLine("  store volatile i8 0, ptr @__pymcu_exn_flag");
-        if (func.ReturnType == DataType.VOID || r.Value is NoneVal)
+        if (r.Tag != null)
+        {
+            // RFC 0009: pack payload + tag into the uniform `{ i32, i8 }` this
+            // function's signature now declares (see ReturnLlT). Build from the
+            // literal zero aggregate (never `undef`) so every bit is defined even
+            // when a member's payload is narrower than the slot.
+            string payload = TaggedPayloadI32(r.Value);
+            string tag = NarrowFromI32(LoadI32(r.Tag), DataType.UINT8);
+            string agg1 = Fresh();
+            _out.WriteLine($"  {agg1} = insertvalue {TaggedReturnLlT} {TaggedReturnZero}, i32 {payload}, 0");
+            string agg2 = Fresh();
+            _out.WriteLine($"  {agg2} = insertvalue {TaggedReturnLlT} {agg1}, i8 {tag}, 1");
+            _out.WriteLine($"  ret {TaggedReturnLlT} {agg2}");
+        }
+        else if (func.ReturnType == DataType.VOID || r.Value is NoneVal)
         {
             _out.WriteLine("  ret void");
         }
@@ -1103,6 +1136,8 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         }
         _out.WriteLine("  store volatile i8 1, ptr @__pymcu_exn_flag");
         if (func.ReturnType == DataType.VOID) _out.WriteLine("  ret void");
+        else if (func.ReturnMembers is { Count: > 0 })
+            _out.WriteLine($"  ret {TaggedReturnLlT} {TaggedReturnZero}");
         else _out.WriteLine($"  ret {LlT(func.ReturnType)} {ZeroOf(func.ReturnType)}");
         _blockOpen = false;
     }
@@ -1532,6 +1567,65 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     // LLVM types its constants: `float 0` is rejected ("integer constant must have
     // integer type"), a float needs 0.0.
     private static string ZeroOf(DataType t) => t == DataType.FLOAT ? "0.0" : "0";
+
+    // RFC 0009: a function whose ReturnMembers is non-empty (an Optional[X]/Union[...]
+    // whose None-ness, or which member, is a run-time fact -- IRGenerator already
+    // decided the compile-time-provable cases cost nothing and never set this) returns
+    // payload and tag together instead of just the payload. The tag itself needs no
+    // backend support at all: `is None`/isinstance/match all lower to an ordinary
+    // comparison on an ordinary byte variable upstream (confirmed against the AVR
+    // backend's own .mir output for these probes -- there is no union-shaped IR
+    // instruction anywhere, only Return.Tag and Call.TagDst at the function boundary).
+    // The payload always travels as this backend's usual i32 "working register",
+    // bitcast to/from float at the two points that build/unpack the struct -- the same
+    // bitcast NarrowFromI32/WidenToI32/CompileBitcast already use for an ordinary float
+    // slot -- so there is exactly one tagged LLVM shape regardless of which member is
+    // live: a function returns `{ i32, i8 }` instead of its ordinary scalar/float type.
+    private const string TaggedReturnLlT = "{ i32, i8 }";
+    private const string TaggedReturnZero = "{ i32 0, i8 0 }";
+
+    private static string ReturnLlT(Function f) =>
+        f.ReturnMembers is { Count: > 0 } ? TaggedReturnLlT : LlT(f.ReturnType);
+
+    // The i32 bit pattern of a tagged return's payload: LoadI32 does not know
+    // FloatConstant (that is LoadF32's job), and a plain numeric LoadF32-style convert
+    // would corrupt a float payload's bits -- the caller un-bitcasts the SAME bits back
+    // to a genuine `float` (see the Call.TagDst branch below), so only a bit-preserving
+    // bitcast round-trips it.
+    private string TaggedPayloadI32(Val value)
+    {
+        if (value is NoneVal) return "0";
+        // Judge by the VALUE's own type, not the function's declared/widest member type:
+        // a Union[int, float, None] function's ReturnType is FLOAT (the widest member,
+        // same convention CompileCall's non-tagged branch reads), but a `return k` arm
+        // returning the int member hands this a genuinely int-typed value -- LoadF32-
+        // then-bitcast on THAT would read it as a float (wrong bits/zero), not
+        // reinterpret its actual i32 bits.
+        if (!IsFloat(value)) return LoadI32(value);
+        string f = LoadF32(value);
+        string bi = Fresh();
+        _out.WriteLine($"  {bi} = bitcast float {f} to i32");
+        return bi;
+    }
+
+    // The reverse of TaggedPayloadI32, at a Call.TagDst call site: `i32Payload` is the
+    // bit pattern extracted from the callee's `{ i32, i8 }`, reinterpreted as `returnType`
+    // (the callee's OWN declared return type, from _returnTypes -- the widest member,
+    // same field CompileCall's non-tagged branch already reads) and stored into `dst`.
+    private void StoreTaggedPayload(string i32Payload, Val dst, DataType returnType)
+    {
+        if (dst is NoneVal) return;
+        if (returnType == DataType.FLOAT)
+        {
+            string f = Fresh();
+            _out.WriteLine($"  {f} = bitcast i32 {i32Payload} to float");
+            StoreF32(f, dst);
+        }
+        else
+        {
+            StoreI32(i32Payload, dst);
+        }
+    }
 
     // LLVM block label derived from a PyMCU label name.
     private static string BlockLabel(string name) => "L." + Sym(name);

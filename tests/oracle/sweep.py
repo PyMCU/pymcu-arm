@@ -4,7 +4,7 @@ reference emulator the same way pymcu-avr uses avr8sharp. MEASUREMENT ONLY: this
 modify the shared corpus (read from the pymcu-avr checkout, untouched) and does not fix any
 compiler behaviour it finds.
 
-Two adaptations are made, both mechanical and applied uniformly to every probe:
+Three adaptations are made, all mechanical and applied uniformly to every probe:
 
 1. The CPython reference run's chip shim is set to the real target chip/arch instead of the
    hardcoded atmega328p/avr pymcu-avr's own test_oracle.py uses -- needed so a probe that
@@ -17,11 +17,22 @@ Two adaptations are made, both mechanical and applied uniformly to every probe:
    SRAM (same ptr[uint8] shape the real chip register tables use) -- a real, zero-initialized,
    read/write byte, not a folded constant. This ONLY changes the firmware build's source, not
    the CPython reference (whose _Ptr shim is address-content-agnostic).
+3. A handful of probes (196, 277; 278 shares the line but never runs it -- it is refused for
+   an unrelated reason before the pointer is read) declare a `BASE` constant that assumes the
+   ATmega328P's low SRAM map (0x0400, or 0x04 used as a page number via `BASE * 256` ==
+   0x0400) and build a `ptr()` from it. 0x0400 is inside RP2040/RP2350's BOOTROM, not SRAM --
+   on real AVR hardware this is free RAM, so the probe's own logic is sound; only the literal
+   address is AVR-specific. BASE's declaration line is swapped for one that resolves to a
+   scratch address near the top of the target chip's SRAM (the same region GPIOR0's
+   replacement lives next to, offset so the two never overlap), widened to `uint32` --
+   `uint8`/`uint16` cannot HOLD a 32-bit SRAM address, which is exactly why this could not be
+   a same-width literal swap like GPIOR0's.
 
 Everything else about a probe -- its logic, its expected divergences, its `# tracked:` bugs --
-is measured as found. A probe that cannot be adapted this way (raw fixed-address `ptr()` bases
-that assume the AVR's low SRAM map, e.g. 277/278) is still compiled and run unmodified; whatever
-happens (compile-fail, hard fault, wrong answer) is itself the data point.
+is measured as found. A probe whose address literal isn't covered by one of the above (there
+are none left in the corpus as of this writing, but a future one would hit this) is still
+compiled and run unmodified; whatever happens (compile-fail, hard fault, wrong answer) is
+itself the data point.
 
 Usage: .venv/bin/python tests/oracle/sweep.py --chip rp2040 --out /path/out.jsonl [--limit N] [--only NAME]
 """
@@ -54,6 +65,26 @@ SCRATCH_ADDR = {
     "rp2040": 0x20041FF0,   # RAM 0x20000000 + 264 KiB, 16 bytes below top
     "rp2350": 0x2007FFF0,   # RAM 0x20000000 + 512 KiB, 16 bytes below top
 }
+
+# 196's `BASE: const[uint16] = 0x0400` (free SRAM on the ATmega328P, used as a direct
+# 16-bit pointer base) and 277/278's `BASE: const[uint8] = 0x04` (the same address, written
+# as a page number: `BASE * 256` == 0x0400) both assume AVR's low SRAM map. On RP2040/RP2350
+# 0x0400 is inside BOOTROM. These sit further below SCRATCH_ADDR's byte -- enough room for
+# 196's `ptr(BASE + 256)` and 277's two-register block (`BASE*256`, `BASE*256 + 1`) -- so
+# neither collides with GPIOR0's replacement or each other. Widened to uint32: the whole
+# reason this needs code, not a same-width literal swap, is that uint8/uint16 cannot hold a
+# 32-bit SRAM address, the way GPIOR0's ptr[uint8] holds AVR's 16-bit one.
+BASE196_ADDR = {
+    "rp2040": 0x20041D00,
+    "rp2350": 0x2007FD00,
+}
+# Stored pre-divided by 256: the probes' own source multiplies BASE back by 256
+# (`BASE * 256`), so BASE itself must already be address // 256.
+BASE277_PAGE = {
+    "rp2040": 0x20041E00 // 256,
+    "rp2350": 0x2007FE00 // 256,
+}
+
 TARGET_CHIP_INFO = {
     "rp2040": ("rp2040", "arm"),
     "rp2350": ("rp2350", "arm"),
@@ -80,16 +111,41 @@ def probe_files() -> list[Path]:
 
 
 def adapt_source(src: str, chip: str) -> str:
-    if GPIOR0_IMPORT not in src:
-        return src
-    # One line in, one line out: several "refuse" probes carry a `# expect: refuse
-    # :LINE:COL: ...` header anchored to the ORIGINAL file's line numbers, so a
-    # replacement that changes the line count would shift every diagnostic below it
-    # and turn a real match into a false "wrong diagnostic".
-    replacement = (
-        f"from pymcu.types import ptr, uint8; GPIOR0: ptr[uint8] = ptr({hex(SCRATCH_ADDR[chip])})"
-    )
-    return src.replace(GPIOR0_IMPORT, replacement)
+    # One line in, one line out for every substitution below: several "refuse" probes
+    # carry a `# expect: refuse :LINE:COL: ...` header anchored to the ORIGINAL file's
+    # line numbers, so a replacement that changes the line count would shift every
+    # diagnostic below it and turn a real match into a false "wrong diagnostic".
+    if GPIOR0_IMPORT in src:
+        replacement = (
+            f"from pymcu.types import ptr, uint8; "
+            f"GPIOR0: ptr[uint8] = ptr({hex(SCRATCH_ADDR[chip])})"
+        )
+        src = src.replace(GPIOR0_IMPORT, replacement)
+
+    # 196: BASE is a direct 16-bit pointer base (`ptr(BASE + off)`), so the replacement
+    # just needs a wider type and a real address -- the arithmetic around it is untouched.
+    # Neither probe imports uint32 (they only need the AVR-sized uint8/uint16 originally),
+    # so the import rides the same line, same "GPIOR0 import" trick as above.
+    base196 = "BASE: const[uint16] = 0x0400"
+    if base196 in src:
+        src = src.replace(
+            base196,
+            f"from pymcu.types import uint32; "
+            f"BASE: const[uint32] = {hex(BASE196_ADDR[chip])}",
+        )
+
+    # 277/278: BASE is a page number the probe's own body multiplies by 256
+    # (`ptr(BASE * 256)`), so the replacement stores the target address PRE-DIVIDED by
+    # 256 rather than the address itself -- the body's `* 256` does the rest.
+    base277 = "BASE: const[uint8] = 0x04"
+    if base277 in src:
+        src = src.replace(
+            base277,
+            f"from pymcu.types import uint32; "
+            f"BASE: const[uint32] = {hex(BASE277_PAGE[chip])}",
+        )
+
+    return src
 
 
 def run_cpython_for_target(src: str, probe_name: str, chip_name: str, arch: str) -> str:

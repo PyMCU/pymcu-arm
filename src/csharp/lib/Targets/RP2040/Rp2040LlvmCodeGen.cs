@@ -206,7 +206,11 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                 program.Functions.Sum(f => f.Body.Count(i => i is GcRoot))
                 + program.Globals.Count(g => g.Type == DataType.GC_REF),
                 1, 1024);
-            EmitGcRuntime(ssSlots);
+            var gcRefGlobalNames = program.Globals
+                .Where(g => g.Type == DataType.GC_REF)
+                .Select(g => g.Name)
+                .ToList();
+            EmitGcRuntime(ssSlots, program.UsesRefPayloads, gcRefGlobalNames);
         }
 
         // Emit only functions reachable from a root (main / interrupt / exported).
@@ -1369,7 +1373,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     // real heap address -- RAM starts at 0x20000000) and __pymcu_gc_alloc treats 0 as
     // "not yet seeded from @__heap_start", so no explicit gc_init() call needs injecting
     // into every program's main() prologue the way AVR's does.
-    private void EmitGcRuntime(int ssSlots)
+    private void EmitGcRuntime(int ssSlots, bool needsRefTrace, IReadOnlyList<string> gcRefGlobalNames)
     {
         int ssBytes = ssSlots * 4;
         _out.WriteLine("; ── GC heap runtime (list[T]/array.array) ──────────────────────────────────");
@@ -1378,6 +1382,12 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine($"@__pymcu_gc_ss_base = internal global [{ssBytes} x i8] zeroinitializer");
         _out.WriteLine("@__heap_start = external global i8");
         _out.WriteLine("@__heap_end = external global i8");
+        // A collection's own count, read directly from SRAM by address in tests (there
+        // is no PyMCU-level builtin that exposes it) to confirm a stress test actually
+        // forced gc_collect to run, rather than inferring it from the program's output
+        // alone -- not internal/private so it keeps a fixed, discoverable symbol name
+        // instead of whatever opt's internalizer would otherwise rename it to.
+        _out.WriteLine("@__pymcu_gc_collect_count = global i32 0");
         _out.WriteLine();
 
         // __pymcu_gc_root_push / _pop: GcRoot/GcUnroot's own runtime half.
@@ -1539,20 +1549,119 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine("}");
         _out.WriteLine();
 
-        // __pymcu_gc_collect: mark then compact, with interrupts held off for the
-        // duration (AVR's own CLI/SREG-restore discipline: a collection in progress that
-        // an ISR interrupts mid-compaction would see a half-moved heap and corrupt it).
-        // PRIMASK is saved and restored verbatim rather than unconditionally re-enabled,
-        // so a collect invoked with interrupts already off (there is no such call site
-        // yet, but __pymcu_gc_alloc's retry-after-collect is reachable from anywhere)
-        // stays off.
+        if (needsRefTrace)
+        {
+            // __pymcu_gc_trace_refs: mark whatever a ref-bearing payload (a list[list[T]]'s
+            // outer object, bit6 of the mark byte) reaches that the shadow-stack walk alone
+            // never would -- inner lists are named only as user_ptrs stored INSIDE the
+            // outer's own payload, never by a named variable of their own. Ported from
+            // AVR's own _gc_trace_refs: repeat a full linear sweep, marking every reachable
+            // slot found, until a sweep marks nothing new (a list three levels deep needs
+            // more than one pass: marking the middle list is what makes the innermost one
+            // reachable). @__pymcu_gc_trace_changed is a plain global instead of threading
+            // the flag through nested-loop phi nodes -- simpler to get right, and this runs
+            // only during a collection already paying for a full heap sweep.
+            _out.WriteLine("@__pymcu_gc_trace_changed = internal global i8 0");
+            _out.WriteLine();
+            _out.WriteLine("define internal void @__pymcu_gc_trace_refs() {");
+            _out.WriteLine("entry:");
+            _out.WriteLine("  %hs = ptrtoint ptr @__heap_start to i32");
+            _out.WriteLine("  br label %pass");
+            _out.WriteLine("pass:");
+            _out.WriteLine("  store i8 0, ptr @__pymcu_gc_trace_changed");
+            _out.WriteLine("  br label %objhead");
+            _out.WriteLine("objhead:");
+            _out.WriteLine("  %cursor = phi i32 [ %hs, %pass ], [ %cursornext, %objnext ]");
+            _out.WriteLine("  %heaptop = load i32, ptr @__pymcu_gc_heap_top");
+            _out.WriteLine("  %cont = icmp ult i32 %cursor, %heaptop");
+            _out.WriteLine("  br i1 %cont, label %objbody, label %passcheck");
+            _out.WriteLine("objbody:");
+            _out.WriteLine("  %hdrptr = inttoptr i32 %cursor to ptr");
+            _out.WriteLine("  %mark = load i8, ptr %hdrptr");
+            _out.WriteLine("  %sizeptr = getelementptr i8, ptr %hdrptr, i32 2");
+            _out.WriteLine("  %size16 = load i16, ptr %sizeptr");
+            _out.WriteLine("  %size = zext i16 %size16 to i32");
+            _out.WriteLine("  %t0 = add i32 %size, 7");
+            _out.WriteLine("  %total = and i32 %t0, -4");
+            _out.WriteLine("  %bit7 = and i8 %mark, -128");
+            _out.WriteLine("  %islive = icmp ne i8 %bit7, 0");
+            _out.WriteLine("  %bit6 = and i8 %mark, 64");
+            _out.WriteLine("  %isrefs = icmp ne i8 %bit6, 0");
+            _out.WriteLine("  %traceit = and i1 %islive, %isrefs");
+            _out.WriteLine("  br i1 %traceit, label %traceobj, label %objnext");
+            _out.WriteLine("traceobj:");
+            _out.WriteLine("  %userptr = add i32 %cursor, 4");
+            _out.WriteLine("  %countptr = inttoptr i32 %userptr to ptr");
+            _out.WriteLine("  %count8 = load i8, ptr %countptr");
+            _out.WriteLine("  %count = zext i8 %count8 to i32");
+            _out.WriteLine("  br label %slothead");
+            _out.WriteLine("slothead:");
+            _out.WriteLine("  %si = phi i32 [ 0, %traceobj ], [ %sinext, %slotnext ]");
+            _out.WriteLine("  %scont = icmp ult i32 %si, %count");
+            _out.WriteLine("  br i1 %scont, label %slotbody, label %objnext");
+            _out.WriteLine("slotbody:");
+            _out.WriteLine("  %slotoff0 = mul i32 %si, 4");
+            _out.WriteLine("  %slotoff = add i32 %slotoff0, 2");
+            _out.WriteLine("  %slotaddr = add i32 %userptr, %slotoff");
+            _out.WriteLine("  %slotptr = inttoptr i32 %slotaddr to ptr");
+            _out.WriteLine("  %val = load i32, ptr %slotptr");
+            _out.WriteLine("  %valnull = icmp eq i32 %val, 0");
+            _out.WriteLine("  br i1 %valnull, label %slotnext, label %checklow");
+            _out.WriteLine("checklow:");
+            _out.WriteLine("  %vabove = icmp uge i32 %val, %hs");
+            _out.WriteLine("  br i1 %vabove, label %checkhigh, label %slotnext");
+            _out.WriteLine("checkhigh:");
+            _out.WriteLine("  %heaptop2 = load i32, ptr @__pymcu_gc_heap_top");
+            _out.WriteLine("  %vbelow = icmp ult i32 %val, %heaptop2");
+            _out.WriteLine("  br i1 %vbelow, label %maybemark, label %slotnext");
+            _out.WriteLine("maybemark:");
+            _out.WriteLine("  %refhdraddr = sub i32 %val, 4");
+            _out.WriteLine("  %refhdrptr = inttoptr i32 %refhdraddr to ptr");
+            _out.WriteLine("  %refmark = load i8, ptr %refhdrptr");
+            _out.WriteLine("  %refbit7 = and i8 %refmark, -128");
+            _out.WriteLine("  %alreadymarked = icmp ne i8 %refbit7, 0");
+            _out.WriteLine("  br i1 %alreadymarked, label %slotnext, label %domark");
+            _out.WriteLine("domark:");
+            _out.WriteLine("  %newrefmark = or i8 %refmark, -128");
+            _out.WriteLine("  store i8 %newrefmark, ptr %refhdrptr");
+            _out.WriteLine("  store i8 1, ptr @__pymcu_gc_trace_changed");
+            _out.WriteLine("  br label %slotnext");
+            _out.WriteLine("slotnext:");
+            _out.WriteLine("  %sinext = add i32 %si, 1");
+            _out.WriteLine("  br label %slothead");
+            _out.WriteLine("objnext:");
+            _out.WriteLine("  %cursornext = add i32 %cursor, %total");
+            _out.WriteLine("  br label %objhead");
+            _out.WriteLine("passcheck:");
+            _out.WriteLine("  %changed = load i8, ptr @__pymcu_gc_trace_changed");
+            _out.WriteLine("  %again = icmp ne i8 %changed, 0");
+            _out.WriteLine("  br i1 %again, label %pass, label %done");
+            _out.WriteLine("done:");
+            _out.WriteLine("  ret void");
+            _out.WriteLine("}");
+            _out.WriteLine();
+        }
+
+        // __pymcu_gc_collect: mark then (if the program ever allocates a ref-bearing
+        // payload) trace, then compact, with interrupts held off for the duration (AVR's
+        // own CLI/SREG-restore discipline: a collection in progress that an ISR interrupts
+        // mid-compaction would see a half-moved heap and corrupt it). PRIMASK is saved and
+        // restored verbatim rather than unconditionally re-enabled, so a collect invoked
+        // with interrupts already off (there is no such call site yet, but
+        // __pymcu_gc_alloc's retry-after-collect is reachable from anywhere) stays off.
+        // The count is bumped outside the critical section -- tests read it, nothing in
+        // the runtime itself depends on its value, so there is nothing to race.
         _out.WriteLine("define internal void @__pymcu_gc_collect() {");
         _out.WriteLine("entry:");
         _out.WriteLine("  %primask = call i32 asm sideeffect \"mrs $0, PRIMASK\", \"=r\"()");
         _out.WriteLine("  call void asm sideeffect \"cpsid i\", \"~{memory}\"()");
         _out.WriteLine("  call void @__pymcu_gc_mark()");
+        if (needsRefTrace) _out.WriteLine("  call void @__pymcu_gc_trace_refs()");
         _out.WriteLine("  call void @__pymcu_gc_compact()");
         _out.WriteLine("  call void asm sideeffect \"msr PRIMASK, $0\", \"r,~{memory}\"(i32 %primask)");
+        _out.WriteLine("  %cnt = load i32, ptr @__pymcu_gc_collect_count");
+        _out.WriteLine("  %cntnext = add i32 %cnt, 1");
+        _out.WriteLine("  store i32 %cntnext, ptr @__pymcu_gc_collect_count");
         _out.WriteLine("  ret void");
         _out.WriteLine("}");
         _out.WriteLine();
@@ -1614,6 +1723,20 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine("  %needinit = icmp eq i32 %top0, 0");
         _out.WriteLine("  br i1 %needinit, label %doinit, label %tryalloc");
         _out.WriteLine("doinit:");
+        // Every GC_REF module-level global is seeded onto the shadow stack here, once,
+        // and never popped -- AVR's own gc_init does the same ("the program's total
+        // GcRoot count... plus the GC_REF globals seeded once at gc_init, which never
+        // pop", AvrCodeGen.cs). A module global is reachable for the program's whole
+        // life, the same way a function-local GC_REF is reachable only for its own
+        // activation's GcRoot/GcUnroot span -- without this, a global list's memory is
+        // never marked live and a real collection (one that actually needs to reclaim
+        // space, not just succeed on its first attempt) silently treats it as garbage.
+        foreach (var gcRefGlobal in gcRefGlobalNames)
+        {
+            string addr = Fresh();
+            _out.WriteLine($"  {addr} = ptrtoint ptr @{Sym(gcRefGlobal)} to i32");
+            _out.WriteLine($"  call void @__pymcu_gc_root_push(i32 {addr})");
+        }
         _out.WriteLine("  %hs = ptrtoint ptr @__heap_start to i32");
         _out.WriteLine("  store i32 %hs, ptr @__pymcu_gc_heap_top");
         _out.WriteLine("  br label %tryalloc");

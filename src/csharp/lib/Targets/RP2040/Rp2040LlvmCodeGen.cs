@@ -1110,12 +1110,42 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
 
     // The unhandled-exception runtime: if UART0 is enabled, print "E:<Name>\r\n" for the
     // pending code, then halt in a tight loop (the asm sideeffect keeps LLVM from folding
-    // the intentionally-infinite loop away). Mirrors the AVR EmitExnRuntime contract.
+    // the intentionally-infinite loop away). Mirrors the AVR EmitExnRuntime contract --
+    // including #340 (below): a program that never calls print() never auto-inits UART0,
+    // so an uncaught raise there used to find TXEN clear and just halt, silently, which is
+    // exactly the hang the limitations page promises never happens. AVR's EmitExnRuntime
+    // programs the UART itself in that case (UartSetup, ~line 5469 of AvrCodeGen.cs); this
+    // one did not -- it only had the OWNED half of that contract (halt if the program
+    // turned its own UART off), never the UNOWNED half (turn it ON so the report can print).
+    // Fixed (#038): when the program does not own UART0 (cfg.UartOwnedByProgram is the
+    // AVR-shared DeviceConfig flag), TXEN clear runs the same reset+baud+pinmux sequence
+    // pymcu.hal.rp2040.uart.UART.__init__ runs for a `UART(baud=stdout_baud)` the program
+    // wrote itself, at [tool.pymcu] stdout_baud, before falling into the normal dispatch.
     private void EmitExnRuntime(IReadOnlyCollection<int> codes)
     {
         bool isM33 = ResolveTarget().Cpu == "cortex-m33";
         uint uartBase = isM33 ? 0x40070000u : 0x40034000u;   // rp2350 : rp2040 UART0
-        uint dr = uartBase + 0x00, fr = uartBase + 0x18, cr = uartBase + 0x30;
+        uint dr = uartBase + 0x00, fr = uartBase + 0x18;
+        uint ibrdReg = uartBase + 0x24, fbrdReg = uartBase + 0x28, lcrH = uartBase + 0x2C, cr = uartBase + 0x30;
+
+        // Same per-chip constants pymcu.chips.{rp2040,rp2350} declare (RESETS_BASE,
+        // IO_BANK0_BASE, the RESET_* bit numbers): rp2350 moved both blocks and widened
+        // which reset bits UART0/IO_BANK0/PADS_BANK0 sit at.
+        uint resetsBase = isM33 ? 0x40020000u : 0x4000C000u;
+        uint ioBank0Base = isM33 ? 0x40028000u : 0x40014000u;
+        int resetUart0Bit = isM33 ? 26 : 22, resetIoBank0Bit = isM33 ? 6 : 5, resetPadsBank0Bit = isM33 ? 9 : 8;
+        uint resetsDone = resetsBase + 0x08, resetsClr = resetsBase + 0x3000;
+        uint resetMask = (1u << resetUart0Bit) | (1u << resetIoBank0Bit) | (1u << resetPadsBank0Bit);
+        // GPIOn_CTRL = IO_BANK0_BASE + 8*n + 0x04; the HAL's UART() default pins (GP0 TX,
+        // GP1 RX) are the ones this runtime has no program-supplied pin to read, so they
+        // are the only pair it can assume.
+        uint gpio0Ctrl = ioBank0Base + 0x04, gpio1Ctrl = ioBank0Base + 0x0C;
+        const uint gpioFuncUart = 2;
+        // clk_peri == clk_sys == cfg.Frequency, same assumption uart.py's _CLK_PERI makes.
+        ulong freq = _cfg.Frequency > 0 ? _cfg.Frequency : 125_000_000UL;
+        ulong baud = (ulong)Math.Max(_cfg.StdoutBaud, 1);
+        uint ibrdVal = (uint)(freq / (16 * baud));
+        uint fbrdVal = (uint)(((freq * 4) / baud) & 0x3F);
 
         foreach (int code in codes)
         {
@@ -1131,7 +1161,6 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine();
         _out.WriteLine("define internal void @__pymcu_unhandled_exn() noreturn {");
         _out.WriteLine("entry:");
-        // UART0 not enabled -> nothing to print, just halt (AVR checks TXEN the same way).
         _out.WriteLine($"  %cr = load volatile i32, ptr inttoptr (i32 {cr} to ptr)");
         _out.WriteLine("  %uarten = and i32 %cr, 1");
         _out.WriteLine("  %off = icmp eq i32 %uarten, 0");
@@ -1139,9 +1168,36 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         {
             _out.WriteLine("  br label %halt");
         }
+        else if (_cfg.UartOwnedByProgram)
+        {
+            // The program manages UART0 itself; TXEN clear here means IT turned it off,
+            // same as AVR's owned branch -- nothing this runtime should second-guess.
+            _out.WriteLine("  br i1 %off, label %halt, label %dispatch");
+        }
         else
         {
-            _out.WriteLine("  br i1 %off, label %halt, label %dispatch");
+            _out.WriteLine("  br i1 %off, label %uart_init, label %dispatch");
+            _out.WriteLine("uart_init:");
+            _out.WriteLine($"  store volatile i32 {resetMask}, ptr inttoptr (i32 {resetsClr} to ptr)");
+            _out.WriteLine("  br label %uart_init.wait");
+            _out.WriteLine("uart_init.wait:");
+            _out.WriteLine($"  %rdone = load volatile i32, ptr inttoptr (i32 {resetsDone} to ptr)");
+            _out.WriteLine($"  %rmasked = and i32 %rdone, {resetMask}");
+            _out.WriteLine($"  %rready = icmp eq i32 %rmasked, {resetMask}");
+            _out.WriteLine("  br i1 %rready, label %uart_init.cont, label %uart_init.wait");
+            _out.WriteLine("uart_init.cont:");
+            _out.WriteLine($"  store volatile i32 {ibrdVal}, ptr inttoptr (i32 {ibrdReg} to ptr)");
+            _out.WriteLine($"  store volatile i32 {fbrdVal}, ptr inttoptr (i32 {fbrdReg} to ptr)");
+            _out.WriteLine($"  store volatile i32 {(3 << 5) | (1 << 4)}, ptr inttoptr (i32 {lcrH} to ptr)");
+            _out.WriteLine($"  store volatile i32 {(1 << 0) | (1 << 8) | (1 << 9)}, ptr inttoptr (i32 {cr} to ptr)");
+            _out.WriteLine($"  store volatile i32 {gpioFuncUart}, ptr inttoptr (i32 {gpio0Ctrl} to ptr)");
+            _out.WriteLine($"  store volatile i32 {gpioFuncUart}, ptr inttoptr (i32 {gpio1Ctrl} to ptr)");
+            _out.WriteLine("  br label %dispatch");
+        }
+        if (codes.Count > 0)
+        {
+            // Shared by both branches above: dispatch on the pending code and replay
+            // its "E:<Name>\r\n" string one byte at a time.
             _out.WriteLine("dispatch:");
             _out.WriteLine("  %code = load volatile i8, ptr @__pymcu_exn_code");
             _out.WriteLine("  switch i8 %code, label %halt [");

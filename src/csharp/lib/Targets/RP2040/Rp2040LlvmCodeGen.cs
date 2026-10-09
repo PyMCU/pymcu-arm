@@ -121,6 +121,21 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                 };
                 if (!extraArrays.TryGetValue(an, out int cur) || bytes > cur) extraArrays[an] = bytes;
             }
+        // #511: a local fixed array passed BY ADDRESS (an ArrayBase operand, e.g. a scratch
+        // output buffer handed to a callee) and never indexed again in its own defining
+        // function carries no ArrayStore/ArrayLoad at all once its all-zero initializer's
+        // per-element stores fold away as the dead stores they are -- that fold is correct;
+        // losing the array's only size-carrying instruction to it is the bug. ArrayByteSizes
+        // (every array arraySizes/arrayElemTypes ever named, module-level or local -- see its
+        // own doc comment) is the fallback for exactly this case.
+        foreach (var func in program.Functions)
+            foreach (var instr in func.Body)
+                foreach (var v in OperandsOf(instr))
+                    if (v is ArrayBase { ArrayName: var an } && an != null
+                        && !program.GlobalArrays.ContainsKey(an) && !_globals.Contains(an)
+                        && !extraArrays.ContainsKey(an)
+                        && program.ArrayByteSizes.TryGetValue(an, out int sizedBytes))
+                        extraArrays[an] = sizedBytes;
         foreach (var (arrName, byteSize) in extraArrays)
             _out.WriteLine($"@{Sym(arrName)} = internal global [{byteSize} x i8] zeroinitializer");
         if (extraArrays.Count > 0) _out.WriteLine();

@@ -482,19 +482,40 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         => _out.WriteLine($"  store {LlT(t)} {val}, ptr {ptr}");
 
     // Sign/zero-extend a narrower load result to i32 (no-op for i32-wide values).
+    // FLOAT is "narrower" by LLVM type name but not by width or kind: a loaded `float`
+    // register reaches here from EmitLoad's generic ArrayLoad/FieldLoad/BufferLoad paths
+    // the same as any i8/i16 slot, and ONLY a bitcast reinterprets its 32 bits as i32 --
+    // sext/zext on a float operand is invalid IR (opt rejects it), the same wrong
+    // instruction class CompileBitcast's own comment already calls out for this pair.
     private string WidenToI32(string val, DataType t)
     {
         if (LlT(t) == "i32") return val;
+        if (t == DataType.FLOAT)
+        {
+            string fr = Fresh();
+            _out.WriteLine($"  {fr} = bitcast float {val} to i32");
+            return fr;
+        }
         string r = Fresh();
         string op = t.IsSigned() ? "sext" : "zext";
         _out.WriteLine($"  {r} = {op} {LlT(t)} {val} to i32");
         return r;
     }
 
-    // Truncate an i32 working value to a narrower slot/register width.
+    // Truncate an i32 working value to a narrower slot/register width. Same FLOAT
+    // exception as WidenToI32 above, in the other direction: a store through
+    // ArrayStore/FieldStore/BufferStore of a float element reaches here with the
+    // float's bits already sitting in an i32 register, and a `trunc` (an integer
+    // narrowing op) on a float destination is invalid IR -- only bitcast reinterprets.
     private string NarrowFromI32(string val, DataType t)
     {
         if (LlT(t) == "i32") return val;
+        if (t == DataType.FLOAT)
+        {
+            string fr = Fresh();
+            _out.WriteLine($"  {fr} = bitcast i32 {val} to float");
+            return fr;
+        }
         string r = Fresh();
         _out.WriteLine($"  {r} = trunc i32 {val} to {LlT(t)}");
         return r;

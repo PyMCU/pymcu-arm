@@ -21,6 +21,21 @@ MEMORY
 /* Full-descending stack starts at the top of SRAM. */
 _stack_top = ORIGIN(RAM) + LENGTH(RAM);
 
+/* The GC heap (list[T]/array.array, the AVR-only collector ported to ARM):
+ * unlike the arena (RFC 0004, a fixed-size static array PyMCU itself tightly sizes from
+ * the program's own bytearray(n) calls), a growing list's peak usage is NOT statically
+ * boundable -- that is the entire reason it needs a collector instead of a bump
+ * allocator with no free(). So the heap gets everything free between the end of static
+ * storage (_ebss, already 4-byte aligned by .bss's own closing ALIGN) and a fixed
+ * reservation below the stack, the same shape AVR's own hand-placed heap_end leaves below
+ * its hardware call stack (AvrCodeGen.cs, EmitGcSramLayout) -- just with a real linker
+ * computing the boundary instead of a literal address, since this target has a real one.
+ * 8 KiB is generous against this chip's 520 KiB of RAM; a program with no list[T] never
+ * references either symbol, so this costs nothing (pure symbol arithmetic, no section). */
+__PYMCU_GC_HEAP_STACK_RESERVE = 8K;
+__heap_start = _ebss;
+__heap_end = _stack_top - __PYMCU_GC_HEAP_STACK_RESERVE;
+
 ENTRY(Reset_Handler)
 
 SECTIONS

@@ -36,6 +36,7 @@ public class NatmodExceptionTests
         var expected = NatmodHarness.RunOnCPython(kernel, module, code);
         var mpy = NatmodHarness.BuildMpy(kernel, module);
         var actual = NatmodHarness.RunOnCircuitPython(module, mpy, code);
+        TestContext.Out.WriteLine(actual);
         actual.Should().Be(expected, "the module must behave as the same Python does under CPython");
     }
 
@@ -156,5 +157,48 @@ public class NatmodExceptionTests
             """, "nx5", """
             for i in range(0, 10):
                 t(nx5.pick, i)
+            """);
+
+    [Test]
+    public void RaiseWithoutAMessage_ArrivesWithNoArguments()
+        => Check("""
+            from pymcu.types import int16
+
+
+            def need_positive(x: int16) -> int16:
+                if x <= 0:
+                    raise ValueError
+                return x
+
+
+            def need_small(x: int16) -> int16:
+                if x > 100:
+                    raise OverflowError
+                return x
+            """, "nx6", """
+            t(nx6.need_positive, 3)
+            t(nx6.need_positive, 0)
+            t(nx6.need_small, 101)
+            t(nx6.need_small, 100)
+            t(nx6.need_positive, 4)
+            """);
+
+    [Test]
+    public void ABufferExport_RaisesAfterReadingItsOwnLength()
+        => Check("""
+            from pymcu.types import int16
+
+
+            def first_positive(buf: bytes) -> int16:
+                i: int16 = 0
+                while i < len(buf):
+                    if buf[i] != 0:
+                        return buf[i]
+                    i = i + 1
+                raise ValueError("all zero")
+            """, "nx7", """
+            t(nx7.first_positive, bytes([0, 0, 7, 9]))
+            t(nx7.first_positive, bytes([0, 0, 0]))
+            t(nx7.first_positive, bytes([5]))
             """);
 }

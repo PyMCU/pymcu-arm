@@ -581,6 +581,17 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     {
         if (IsFloat(u.Src) || IsFloat(u.Dst))
         {
+            if (u.Op == UnaryOp.Not)
+            {
+                // `not x` on a float is the same truth test as `x == 0.0`: ordered
+                // float equality already treats -0.0 as equal to 0.0 (both falsy) and
+                // is false whenever either side is NaN, so NaN (like +-inf) comes out
+                // truthy -- exactly CPython's rule, for free, via the same oeq compare
+                // EmitFloatBinOp uses for BinaryOp.Equal. No bit-masking trick needed.
+                string fx0 = LoadF32(u.Src);
+                StoreI32(ZextFcmp("oeq", fx0, "0.0"), u.Dst);
+                return;
+            }
             if (u.Op != UnaryOp.Neg)
                 throw new NotSupportedException($"ARM backend: float unary op {u.Op}");
             string fx = LoadF32(u.Src);

@@ -29,9 +29,10 @@ public class NatmodExceptionTests
 
         """;
 
-    private static void Check(string kernel, string module, string exercise)
+    private static void Check(string kernel, string module, string exercise, bool needsCPython314 = false)
     {
         NatmodHarness.RequireWorkingEmulator();
+        if (needsCPython314) NatmodHarness.RequireCPython(3, 14);
         var code = $"import {module}\n{Helpers}\n{exercise}";
         var expected = NatmodHarness.RunOnCPython(kernel, module, code);
         var mpy = NatmodHarness.BuildMpy(kernel, module);
@@ -57,7 +58,7 @@ public class NatmodExceptionTests
             """);
 
     [Test]
-    public void DivisionByZero_RaisesZeroDivisionError()
+    public void DivisionByZero_RaisesZeroDivisionErrorWithCPythonsText()
         => Check("""
             from pymcu.types import int16
 
@@ -69,14 +70,14 @@ public class NatmodExceptionTests
             def mod(a: int16, b: int16) -> int16:
                 return a % b
             """, "nx2", """
-            tn(nx2.div, 7, 2)
-            tn(nx2.div, -7, 2)
-            tn(nx2.div, 7, 0)
-            tn(nx2.mod, 7, 3)
-            tn(nx2.mod, -7, 3)
-            tn(nx2.mod, 7, 0)
-            tn(nx2.div, 9, 3)
-            """);
+            t(nx2.div, 7, 2)
+            t(nx2.div, -7, 2)
+            t(nx2.div, 7, 0)
+            t(nx2.mod, 7, 3)
+            t(nx2.mod, -7, 3)
+            t(nx2.mod, 7, 0)
+            t(nx2.div, 9, 3)
+            """, needsCPython314: true);
 
     [Test]
     public void TryExceptInsideTheKernel_HandlesItWithoutLeavingTheModule()

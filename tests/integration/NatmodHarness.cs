@@ -111,7 +111,10 @@ public static class NatmodHarness
     public static byte[] BuildMpy(string kernel, string module)
     {
         RequireToolchain();
-        var dir = Path.Combine(Path.GetTempPath(), "pymcu-natmod-gen", Sha(kernel + module));
+        // Per process: the compiler is not part of the key, so a directory that outlived the run would
+        // hand back a module built by the compiler of an earlier one.
+        var dir = Path.Combine(Path.GetTempPath(), "pymcu-natmod-gen",
+                               Environment.ProcessId.ToString(), Sha(kernel + module));
         var mpy = Path.Combine(dir, "dist", module + ".mpy");
         if (!File.Exists(mpy))
         {
@@ -138,6 +141,20 @@ public static class NatmodHarness
         File.WriteAllText(Path.Combine(dir, module + ".py"), kernel);
         File.WriteAllText(Path.Combine(dir, "run.py"), codePy);
         return Run("python3", "run.py", dir).Replace("\r", "");
+    }
+
+    /// <summary>
+    /// CPython words some messages differently from one release to the next (a ZeroDivisionError
+    /// says "integer division or modulo by zero" up to 3.13 and "division by zero" from 3.14), so a
+    /// test that compares the text is ignored when the reference interpreter is older than the
+    /// release the compiler's wording was taken from.
+    /// </summary>
+    public static void RequireCPython(int major, int minor)
+    {
+        var v = Run("python3", "-c \"import sys; print(sys.version_info[0], sys.version_info[1])\"",
+                    Path.GetTempPath()).Trim().Split(' ');
+        if (int.Parse(v[0]) < major || (int.Parse(v[0]) == major && int.Parse(v[1]) < minor))
+            Assert.Ignore($"python3 here is {v[0]}.{v[1]}; this case compares text worded as in CPython {major}.{minor}.");
     }
 
     private static byte[] FlashFromUf2(byte[] uf2)

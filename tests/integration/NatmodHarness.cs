@@ -22,7 +22,9 @@ public static class NatmodHarness
     {
         get
         {
-            var env = Environment.GetEnvironmentVariable("PYMCU_NATMOD_CP_TREE");
+            // PYMCU_CIRCUITPYTHON is the variable `pymcu natmod` itself reads, so one setting serves both.
+            var env = Environment.GetEnvironmentVariable("PYMCU_NATMOD_CP_TREE")
+                      ?? Environment.GetEnvironmentVariable("PYMCU_CIRCUITPYTHON");
             var path = !string.IsNullOrEmpty(env) ? env : Path.Combine(Home, "Repos", "circuitpython-1031");
             if (!File.Exists(Path.Combine(path, "py", "dynruntime.h")))
                 Assert.Ignore($"no CircuitPython 10.3.1 tree at {path} (set PYMCU_NATMOD_CP_TREE).");
@@ -35,7 +37,8 @@ public static class NatmodHarness
     {
         get
         {
-            var env = Environment.GetEnvironmentVariable("PYMCU_NATMOD_CP_UF2");
+            var env = Environment.GetEnvironmentVariable("PYMCU_NATMOD_CP_UF2")
+                      ?? Environment.GetEnvironmentVariable("PYMCU_CP_UF2");
             var candidates = new[]
             {
                 env ?? "",
@@ -76,12 +79,38 @@ public static class NatmodHarness
         return stdout;
     }
 
+    /// <summary>
+    /// `pymcu natmod --check` states what the machine lacks (pyelftools, arm-none-eabi-gcc, the ARM
+    /// backend, the CircuitPython tree) in one line each. A missing requirement is a reason to
+    /// ignore the test, not to fail it; the answer is asked once per run.
+    /// </summary>
+    private static void RequireToolchain()
+    {
+        var verdict = ToolchainVerdict.Value;
+        if (verdict != null) Assert.Ignore(verdict);
+    }
+
+    private static readonly Lazy<string?> ToolchainVerdict = new(() =>
+    {
+        if (!File.Exists(Pymcu)) return $"no pymcu driver at {Pymcu} (create the repo .venv).";
+        var psi = new ProcessStartInfo(Pymcu, $"natmod --check --circuitpython \"{CircuitPythonTree}\"")
+        {
+            WorkingDirectory = Path.GetTempPath(), RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        using var p = Process.Start(psi)!;
+        var err = p.StandardError.ReadToEndAsync();
+        var outText = p.StandardOutput.ReadToEnd();
+        p.WaitForExit();
+        return p.ExitCode == 0 ? null : "pymcu natmod cannot build here: " + outText.Trim() + err.Result.Trim();
+    });
+
     private static string Sha(string s)
         => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(s)))[..16];
 
     /// <summary>Compiles <paramref name="kernel"/> as module <paramref name="module"/>; returns the .mpy.</summary>
     public static byte[] BuildMpy(string kernel, string module)
     {
+        RequireToolchain();
         var dir = Path.Combine(Path.GetTempPath(), "pymcu-natmod-gen", Sha(kernel + module));
         var mpy = Path.Combine(dir, "dist", module + ".mpy");
         if (!File.Exists(mpy))

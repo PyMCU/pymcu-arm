@@ -54,6 +54,11 @@ def _env() -> dict:
     _need("arm-none-eabi-gcc", shutil.which("arm-none-eabi-gcc"))
     pymcu = os.environ.get("PYMCU_BIN") or shutil.which("pymcu")
     _need("the pymcu driver (PYMCU_BIN)", pymcu)
+    # What the command itself needs (pyelftools, the ARM backend, ...) is the command's to say.
+    check = subprocess.run([pymcu, "natmod", "--check", "--circuitpython", cp],
+                           capture_output=True, text=True, cwd=str(Path.home()))
+    if check.returncode != 0:
+        pytest.skip("pymcu natmod cannot build here: " + (check.stdout + check.stderr).strip())
     return {"cp": cp, "uf2": uf2, "sharp": src, "pymcu": pymcu}
 
 

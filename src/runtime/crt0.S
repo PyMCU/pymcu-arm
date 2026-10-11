@@ -200,19 +200,33 @@ SF_SHIM __aeabi_fdiv, 0x0c
 SF_SHIM __aeabi_i2f,  0x2c
 SF_SHIM __aeabi_ui2f, 0x34
 
-    /* fcmp_fast: r0 = -1 (a<b), 0 (a==b), 1 (a>b). */
+    /* fcmp_fast: r0 = -1 (a<b), 0 (a==b), 1 (a>b); the ROM has no NaN handling and
+     * answers 0 (equal) for any NaN operand. This wrapper returns 2 (unordered) when
+     * either operand is a NaN, and tail-calls the ROM otherwise, so every shim below
+     * reads 2 as "false" for ==, <, <=, > and >=, and so "true" for != (which LLVM
+     * lowers as the negation of ==). A NaN is (bits << 1) > 0xFF000000. */
     .align 2
     .thumb_func
 __pymcu_fcmp:
+    ldr  r3, =0xFF000000
+    lsls r2, r0, #1
+    cmp  r2, r3
+    bhi  1f
+    lsls r2, r1, #1
+    cmp  r2, r3
+    bhi  1f
     ldr  r2, =__pymcu_sf_table
     ldr  r2, [r2]
     ldr  r2, [r2, #0x10]
     bx   r2
+1:  movs r0, #2
+    bx   lr
+    .ltorg
 
     .align 2
     .global __aeabi_fcmplt
     .thumb_func
-__aeabi_fcmplt:                 @ 1 iff a < b  (fcmp == -1: sign bit set)
+__aeabi_fcmplt:                 @ 1 iff a < b  (fcmp == -1: sign bit set; 2 -> 0)
     push {lr}
     bl   __pymcu_fcmp
     lsrs r0, r0, #31
@@ -247,11 +261,11 @@ __aeabi_fcmpeq:                 @ 1 iff a == b (fcmp == 0)
     .align 2
     .global __aeabi_fcmple
     .thumb_func
-__aeabi_fcmple:                 @ 1 iff a <= b (fcmp <= 0)
+__aeabi_fcmple:                 @ 1 iff a <= b (fcmp is -1 or 0; unordered 2 -> 0)
     push {lr}
     bl   __pymcu_fcmp
-    cmp  r0, #1
-    beq  1f
+    cmp  r0, #0
+    bgt  1f
     movs r0, #1
     pop  {pc}
 1:  movs r0, #0
@@ -260,20 +274,32 @@ __aeabi_fcmple:                 @ 1 iff a <= b (fcmp <= 0)
     .align 2
     .global __aeabi_fcmpge
     .thumb_func
-__aeabi_fcmpge:                 @ 1 iff a >= b (fcmp >= 0: not -1)
+__aeabi_fcmpge:                 @ 1 iff a >= b (fcmp is 0 or 1; -1 and unordered 2 -> 0)
     push {lr}
     bl   __pymcu_fcmp
-    lsrs r0, r0, #31
-    movs r1, #1
-    eors r0, r1
+    cmp  r0, #1
+    bls  1f
+    movs r0, #0
+    pop  {pc}
+1:  movs r0, #1
     pop  {pc}
 
     .align 2
     .global __aeabi_fcmpun
     .thumb_func
-__aeabi_fcmpun:                 @ mufplib has no NaN handling: never unordered
+__aeabi_fcmpun:                 @ 1 iff either operand is a NaN
+    ldr  r3, =0xFF000000
+    lsls r2, r0, #1
+    cmp  r2, r3
+    bhi  1f
+    lsls r2, r1, #1
+    cmp  r2, r3
+    bhi  1f
     movs r0, #0
     bx   lr
+1:  movs r0, #1
+    bx   lr
+    .ltorg
 
     /* float -> int32 toward zero: ROM float2int rounds toward -inf, identical for
      * non-negative inputs; negate negative inputs around the conversion. */

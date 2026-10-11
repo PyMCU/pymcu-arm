@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Runs a CircuitPython .mpy in RP2040Sharp. Not part of tests/integration: it needs an
+       emulator that carries the ADD high-register PC fix (RP2040Sharp f622e3c), which is not
+       on NuGet yet, so the checkout is given by RP2040SHARP_SRC and the tests skip without it. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RP2040SHARP_SRC)/src/RP2040.TestKit/RP2040.TestKit.csproj" />
+  </ItemGroup>
+</Project>

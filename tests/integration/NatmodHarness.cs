@@ -207,10 +207,23 @@ public static class NatmodHarness
     /// </summary>
     public static void RequireWorkingEmulator()
     {
-        const string Probe = "from pymcu.types import int16\n\n\ndef add(a: int16, b: int16) -> int16:\n    return a + b\n";
-        var mpy = BuildMpy(Probe, "probe");
-        var got = RunOnCircuitPython("probe", mpy, "import probe\nprint(probe.add(2, 3))\n").Trim();
-        if (got != "5")
-            Assert.Ignore("this RP2040Sharp does not load a native module (it lacks fix f622e3c); got: " + got);
+        // Decided once per run: on an emulator that cannot load a native module the probe waits out
+        // its whole boot timeout, and every test repeating it would cost minutes to report the same thing.
+        var verdict = EmulatorVerdict.Value;
+        if (verdict != null) Assert.Ignore(verdict);
     }
+
+    private static readonly Lazy<string?> EmulatorVerdict = new(() =>
+    {
+        const string Probe = "from pymcu.types import int16\n\n\ndef add(a: int16, b: int16) -> int16:\n    return a + b\n";
+        try
+        {
+            var mpy = BuildMpy(Probe, "probe");
+            var got = RunOnCircuitPython("probe", mpy, "import probe\nprint(probe.add(2, 3))\n").Trim();
+            return got == "5"
+                ? null
+                : "this RP2040Sharp does not load a native module (it lacks fix f622e3c); got: " + got;
+        }
+        catch (IgnoreException e) { return e.Message; }
+    });
 }

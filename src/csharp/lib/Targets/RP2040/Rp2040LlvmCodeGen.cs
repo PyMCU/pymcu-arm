@@ -69,6 +69,18 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
     private Dictionary<string, DataType> _returnTypes = new();       // func -> return type
     private Dictionary<string, DataType> _slots = new();            // current func: var/tmp -> type
     private HashSet<string> _nakedFns = new();                      // @naked function names (never tail-call)
+    // The three words the exception channel of a native module is made of -- the pending
+    // flag, the exception code and the message pointer. They are internal like every other
+    // global, but in a library they must be reachable from the kernel's own code, and mpy_ld.py
+    // accepts a pc-relative reference to .data.rel.ro and refuses one to .bss ("bss variables
+    // can't be static"; an external symbol would need R_ARM_GOT_BREL, which LLVM does not
+    // emit: it emits R_ARM_GOT_PREL). So in a library they are written into .data.rel.ro,
+    // which the loader copies into the module's RAM block like the rest of its image, and the
+    // adapter reads them through pymcu_exn_take (EmitExnTake) rather than by symbol.
+    private static string ExnChannelSection(ProgramIR program, string name)
+        => program.IsLibrary && name is "__pymcu_exn_flag" or "__pymcu_exn_code" or "__exn_msg"
+            ? ", section \".data.rel.ro\", align 4" : "";
+
     private bool _exnEnabled;                                       // program uses the exception model
 
     public override void Compile(ProgramIR program, TextWriter output)
@@ -88,7 +100,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         // Module-level globals.
         _globals = new HashSet<string>(program.Globals.Select(g => g.Name));
         foreach (var g in program.Globals)
-            _out.WriteLine($"@{Sym(g.Name)} = internal global {LlT(g.Type)} {ZeroOf(g.Type)}");
+            _out.WriteLine($"@{Sym(g.Name)} = internal global {LlT(g.Type)} {ZeroOf(g.Type)}{ExnChannelSection(program, g.Name)}");
         if (program.Globals.Count > 0) _out.WriteLine();
 
         // Named fixed-size arrays (ZCA instance backing stores, small buffers) as
@@ -170,12 +182,13 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             f.Body.Any(i => i is SignalError or SignalSuccess or BranchOnError));
         if (_exnEnabled)
         {
-            _out.WriteLine("@__pymcu_exn_flag = internal global i8 0");
-            _out.WriteLine("@__pymcu_exn_code = internal global i8 0");
+            _out.WriteLine($"@__pymcu_exn_flag = internal global i8 0{ExnChannelSection(program, "__pymcu_exn_flag")}");
+            _out.WriteLine($"@__pymcu_exn_code = internal global i8 0{ExnChannelSection(program, "__pymcu_exn_code")}");
             _out.WriteLine();
 
             // The unhandled-exception runtime (prints E:<Name> over UART0, then halts) is
             // emitted only when something actually targets it (same criterion as AVR).
+            if (program.IsLibrary) EmitExnTake();
             bool needsRuntime = program.Functions.Any(f =>
                 f.Body.OfType<Call>().Any(c => c.FunctionName == "__pymcu_unhandled_exn")
                 || f.Body.OfType<BranchOnError>().Any(b => b.ErrorLabel == "__pymcu_unhandled_exn"));
@@ -1223,6 +1236,39 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         PyMCU.Common.BuiltinExceptionNames.TryGetName(code, out var name)
             ? name
             : $"Exception{code}";
+
+    // uint32_t pymcu_exn_take(uint32_t *msg): the one function the generated adapter of a native
+    // module calls after every export. Returns 0 when nothing is pending; otherwise clears the
+    // pending flag and returns 0x100 | code, with the message pointer (0 when the raise had none)
+    // stored through <msg>. The adapter owns <msg>, so the kernel never has to name a symbol it
+    // cannot reach.
+    private void EmitExnTake()
+    {
+        bool hasMsg = _globals.Contains("__exn_msg");
+        _out.WriteLine("define i32 @pymcu_exn_take(ptr %msg) {");
+        _out.WriteLine("entry:");
+        _out.WriteLine("  %f = load volatile i8, ptr @__pymcu_exn_flag");
+        _out.WriteLine("  %pending = icmp ne i8 %f, 0");
+        _out.WriteLine("  br i1 %pending, label %yes, label %no");
+        _out.WriteLine("yes:");
+        _out.WriteLine("  %c8 = load volatile i8, ptr @__pymcu_exn_code");
+        _out.WriteLine("  %c32 = zext i8 %c8 to i32");
+        _out.WriteLine("  store volatile i8 0, ptr @__pymcu_exn_flag");
+        if (hasMsg)
+        {
+            _out.WriteLine("  %m = load volatile i32, ptr @__exn_msg");
+            _out.WriteLine("  store volatile i32 0, ptr @__exn_msg");
+            _out.WriteLine("  store i32 %m, ptr %msg");
+        }
+        else _out.WriteLine("  store i32 0, ptr %msg");
+        _out.WriteLine("  %r = or i32 %c32, 256");
+        _out.WriteLine("  ret i32 %r");
+        _out.WriteLine("no:");
+        _out.WriteLine("  store i32 0, ptr %msg");
+        _out.WriteLine("  ret i32 0");
+        _out.WriteLine("}");
+        _out.WriteLine();
+    }
 
     // The unhandled-exception runtime: if UART0 is enabled, print "E:<Name>\r\n" for the
     // pending code, then halt in a tight loop (the asm sideeffect keeps LLVM from folding

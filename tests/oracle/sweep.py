@@ -162,9 +162,13 @@ BASE277_PAGE = {
     "rp2350": 0x2007FE00 // 256,
 }
 
+# (pymcu chip name, arch, the frequency the driver builds the target at by default). The
+# frequency is measured, not assumed: a program printing __FREQ__ built for rp2040 prints
+# 125000000 and for rp2350 150000000. The CPython shim reports it, so a probe that branches
+# on __FREQ__ compares against the clock the firmware actually runs at.
 TARGET_CHIP_INFO = {
-    "rp2040": ("rp2040", "arm"),
-    "rp2350": ("rp2350", "arm"),
+    "rp2040": ("rp2040", "arm", 125_000_000),
+    "rp2350": ("rp2350", "arm", 150_000_000),
 }
 
 # A `# expect: refuse <text>` header is worded for AVR's toolchain (binutils' as/ld), which
@@ -254,7 +258,7 @@ def adapt_source(src: str, chip: str) -> str:
     return src
 
 
-def run_cpython_for_target(src: str, probe_name: str, chip_name: str, arch: str) -> str:
+def run_cpython_for_target(src: str, probe_name: str, chip_name: str, arch: str, freq: int) -> str:
     """Same as avr_oracle.run_cpython, but the chip shim reports the real target chip
     instead of the hardcoded atmega328p/avr -- see module docstring, adaptation 1."""
     buf = io.StringIO()
@@ -263,6 +267,9 @@ def run_cpython_for_target(src: str, probe_name: str, chip_name: str, arch: str)
     chip_mod.__CHIP__.name = chip_name
     chip_mod.__CHIP__.arch = arch
     sys.modules["pymcu.chips"].__CHIP__ = chip_mod.__CHIP__
+    # The shim installs the AVR clock (16 MHz); the target runs at its own.
+    sys.modules["pymcu"].__FREQ__ = freq
+    sys.modules["pymcu.chips"].__FREQ__ = freq
 
     # Adaptation 4 (461): a fake pymcu.chips.<target> module, GPIOR0 shimmed the same shape
     # as atmega328p's own (install_cpython_shims above), so `import pymcu.chips.rp2040 as
@@ -330,7 +337,7 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
         record["reason"] = f"restricted to the {expectation.frontend} front end; this sweep runs the default front end only"
         return record
 
-    chip_name, arch = TARGET_CHIP_INFO[chip]
+    chip_name, arch, freq = TARGET_CHIP_INFO[chip]
     adapted = adapt_source(src, chip)
     returncode, bin_path, log = compile_probe(tmp_dir, name, adapted, chip, pymcu)
 
@@ -367,7 +374,7 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
         record["outcome"] = "runner_timeout"
         return record
 
-    expected = run_cpython_for_target(src, name, chip_name, arch)
+    expected = run_cpython_for_target(src, name, chip_name, arch, freq)
     if expectation.kind == "divergence":
         expected = avr_oracle.apply_divergence(expectation.divergence_doc, expected)
 

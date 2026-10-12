@@ -280,15 +280,20 @@ def run_cpython_for_target(src: str, probe_name: str, chip_name: str, arch: str,
     sys.modules[f"pymcu.chips.{chip_name}"] = target_chip_mod
 
     globals_ = {"__name__": "__main__", "__file__": str(PROBES_DIR / f"{probe_name}.py")}
+    # The harness writes the program as main.py in the project, and a probe may open it by
+    # name (684: open(name) with name = "main.py"). The reference runs in a directory that
+    # has that file too, so the probe sees what it sees on the target.
     try:
-        with contextlib.redirect_stdout(buf):
-            try:
-                exec(compile(src, probe_name, "exec"), globals_)
-            except SystemExit:
-                pass
-            except BaseException as exc:  # noqa: BLE001 - mirrors avr_oracle.run_cpython
-                msg = str(exc)
-                print(f"E:{type(exc).__name__}: {msg}" if msg else f"E:{type(exc).__name__}")
+        with tempfile.TemporaryDirectory(prefix="oracle-cpython-") as cwd:
+            Path(cwd, "main.py").write_text(src)
+            with contextlib.redirect_stdout(buf), contextlib.chdir(cwd):
+                try:
+                    exec(compile(src, probe_name, "exec"), globals_)
+                except SystemExit:
+                    pass
+                except BaseException as exc:  # noqa: BLE001 - mirrors avr_oracle.run_cpython
+                    msg = str(exc)
+                    print(f"E:{type(exc).__name__}: {msg}" if msg else f"E:{type(exc).__name__}")
     finally:
         avr_oracle.restore_modules(previous)
     return buf.getvalue()

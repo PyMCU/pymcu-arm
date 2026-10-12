@@ -194,6 +194,12 @@ TARGET_SPECIFIC_PROBES = {
     "841_heap_exhausted_by_static_storage.py":
         "sized to exhaust an ATmega328P's 2 KiB of SRAM; the heap on this chip is two orders of "
         "magnitude larger, so there is no exhaustion to report",
+    # Asks for a 256-byte object to hit the 255-byte payload ceiling of the AVR heap header
+    # (one length byte). The RP2040 header keeps 16 bits, so the same object is allocated and
+    # the program prints its length, which is what CPython does.
+    "840_annotated_list_literal_exceeds_object_ceiling.py":
+        "pins the AVR heap's 255-byte object ceiling; the RP2040 header holds 16 bits of length, "
+        "so the object is allocated (its own ceiling is pinned by HeapObjectCeilingTests)",
 }
 
 

@@ -321,12 +321,19 @@ def compile_probe(tmp_dir: Path, name: str, src: str, chip: str, pymcu: Path) ->
     return result.returncode, (str(bin_path) if bin_path.is_file() else None), result.stdout + result.stderr
 
 
-def run_emulator(chip: str, firmware_bin: str, max_ms: float = 4000) -> str:
+def run_emulator(chip: str, firmware_bin: str, max_ms: float = 4000) -> tuple[str, bool]:
+    """The console output, and whether the core ended locked up.
+
+    The runner prints "[runner] <chip> hardfaults=... lockup=True|False" on stderr for both
+    chips. A HardFault escalates to lockup on these cores, so lockup is the crash signal;
+    rp2040's TestKit has no HardFault counter to report.
+    """
     result = subprocess.run(
         ["dotnet", str(RUNNER_DLL), chip, firmware_bin, str(max_ms)],
         capture_output=True, text=True, timeout=90,
     )
-    return result.stdout.replace("\r\n", "\n")
+    lockup = re.search(r"lockup=(True|False)", result.stderr)
+    return result.stdout.replace("\r\n", "\n"), bool(lockup and lockup.group(1) == "True")
 
 
 def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
@@ -374,7 +381,7 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
         return record
 
     try:
-        actual = run_emulator(chip, bin_path)
+        actual, locked_up = run_emulator(chip, bin_path)
     except subprocess.TimeoutExpired:
         record["outcome"] = "runner_timeout"
         return record
@@ -383,10 +390,16 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
     if expectation.kind == "divergence":
         expected = avr_oracle.apply_divergence(expectation.divergence_doc, expected)
 
-    if expected == actual:
+    if locked_up:
+        # The core reached lockup: a HardFault escalated, or the firmware crashed.
+        record["outcome"] = "crash"
+        record["detail"] = actual[-200:]
+    elif expected == actual:
         record["outcome"] = "match"
-    elif "END\n" not in actual and actual.strip() == "":
-        record["outcome"] = "crash_or_timeout"
+    elif "END\n" not in actual:
+        # No lockup and no END within the budget: a loop, or code that never returns.
+        record["outcome"] = "timeout"
+        record["detail"] = actual[-200:]
     else:
         record["outcome"] = "mismatch"
         record["detail"] = avr_oracle.first_difference(expected, actual)

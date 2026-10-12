@@ -355,6 +355,12 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
         record["detail"] = detail
         return record
 
+    if expectation.kind == "compile":
+        # `expect: compile` probes only have to build. They print nothing and never reach
+        # END, so running them would read an empty console as a crash.
+        record["outcome"] = "compiled"
+        return record
+
     try:
         actual = run_emulator(chip, bin_path)
     except subprocess.TimeoutExpired:

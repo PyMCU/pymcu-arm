@@ -10,6 +10,11 @@
     <!-- RP2350.TestKit is not published to nuget.org: reference the sibling repo locally,
          the same layout tests/integration/PyMCU.IntegrationTests.csproj assumes, one
          directory deeper here (tests/oracle/runner vs tests/integration). -->
+    <!-- The RP2350Sharp sibling must be a real checkout at ../../../../RP2350Sharp, not a
+         symlink to one. Through a symlink MSBuild sees RP2350Sharp twice (under the link's
+         path and under the real one): the copy reached through the link never gets its
+         reference assembly (CS0006), and the runner stops with CS0234 "RP2350.Peripherals
+         does not exist" even though the namespace is there. -->
     <ProjectReference Include="../../../../RP2350Sharp/src/RP2350.TestKit/RP2350.TestKit.csproj" />
   </ItemGroup>
 </Project>

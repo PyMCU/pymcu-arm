@@ -183,6 +183,20 @@ LINKER_DIAGNOSTIC_EQUIVALENTS = {
 }
 
 
+# Probes whose point is a property of the AVR chip the corpus was written for, not of the
+# language: running them on another chip measures the chip. Reported as not measured, with the
+# reason, instead of as a mismatch nobody can act on.
+TARGET_SPECIFIC_PROBES = {
+    # Sizes a module-level array to leave an ATmega328P's 2048-byte SRAM with almost no heap and
+    # expects the next allocation to fail. An RP2040 has 264 KiB and a heap that takes everything
+    # free below the stack, so the same array leaves it nearly all of it; the program succeeds,
+    # which is correct there.
+    "841_heap_exhausted_by_static_storage.py":
+        "sized to exhaust an ATmega328P's 2 KiB of SRAM; the heap on this chip is two orders of "
+        "magnitude larger, so there is no exhaustion to report",
+}
+
+
 def _diagnostic_matches(expected: str, log: str) -> bool:
     # The driver's own CLI pretty-prints diagnostics wrapped to a column width that
     # depends on the terminal/pipe it thinks it is writing to, which can -- and for 081,
@@ -343,6 +357,11 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
     record = {"probe": probe.name, "expect": expectation.kind, "chip": chip}
     if expectation.tracked:
         record["tracked"] = expectation.tracked
+
+    if probe.name in TARGET_SPECIFIC_PROBES:
+        record["outcome"] = "no_medido"
+        record["reason"] = TARGET_SPECIFIC_PROBES[probe.name]
+        return record
 
     if expectation.frontend is not None and expectation.frontend != "default":
         record["outcome"] = "no_medido"

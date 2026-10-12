@@ -63,9 +63,10 @@ public static class PymcuCompiler
     /// the RP2350 sim's instruments (e.g. SioPeripheral.OnGpioChanged, which the packaged
     /// RP2040 sim does not have).
     /// </summary>
-    public static byte[] BuildSourceRp2350(string mainPy, string? stdlib = null, string? board = null)
-        => BinCache.GetOrAdd("rp2350:src:" + Sha(mainPy + stdlib + board),
-            _ => new Lazy<byte[]>(() => CompileSource(mainPy, "rp2350", stdlib, board))).Value;
+    public static byte[] BuildSourceRp2350(string mainPy, string? stdlib = null, string? board = null,
+        int frequency = 125_000_000)
+        => BinCache.GetOrAdd("rp2350:src:" + Sha(mainPy + stdlib + board + frequency),
+            _ => new Lazy<byte[]>(() => CompileSource(mainPy, "rp2350", stdlib, board, frequency))).Value;
 
     /// <summary>
     /// Directory of the throwaway project <see cref="BuildSourceRp2040"/> builds, for tests
@@ -82,9 +83,12 @@ public static class PymcuCompiler
         return Convert.ToHexString(bytes);
     }
 
-    private static byte[] CompileSource(string mainPy, string target, string? stdlib, string? board)
+    private static byte[] CompileSource(string mainPy, string target, string? stdlib, string? board,
+        int frequency = 125_000_000)
     {
-        var dir = SourceDir(mainPy, target, stdlib, board);
+        var dir = frequency == 125_000_000
+            ? SourceDir(mainPy, target, stdlib, board)
+            : SourceDir(mainPy + "|" + frequency, target, stdlib, board);
         Directory.CreateDirectory(Path.Combine(dir, "src"));
         File.WriteAllText(Path.Combine(dir, "pyproject.toml"),
             "[project]\n" +
@@ -92,7 +96,7 @@ public static class PymcuCompiler
             "version = \"0.1.0\"\n\n" +
             "[tool.pymcu]\n" +
             (board == null ? $"target = \"{target}\"\n" : $"board = \"{board}\"\n") +
-            "frequency = 125000000\n" +
+            $"frequency = {frequency}\n" +
             "sources = \"src\"\n" +
             "entry = \"main.py\"\n" +
             (stdlib == null ? "" : $"stdlib = [\"{stdlib}\"]\n"));

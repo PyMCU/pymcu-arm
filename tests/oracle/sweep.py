@@ -1,4 +1,4 @@
-"""Runs the pymcu-avr language oracle corpus (440 probes, tests/oracle/probes/*.py) against
+"""Runs the pymcu-avr language oracle corpus (tests/oracle/probes/*.py) against
 the ARM targets (rp2040, rp2350) this repo builds for, using RP2040Sharp/RP2350Sharp as the
 reference emulator the same way pymcu-avr uses avr8sharp. MEASUREMENT ONLY: this does not
 modify the shared corpus (read from the pymcu-avr checkout, untouched) and does not fix any
@@ -50,6 +50,10 @@ compiled and run unmodified; whatever happens (compile-fail, hard fault, wrong a
 itself the data point.
 
 Usage: .venv/bin/python tests/oracle/sweep.py --chip rp2040 --out /path/out.jsonl [--limit N] [--only NAME]
+       [--oracle-root DIR] [--pymcu PATH]
+
+The corpus comes from --oracle-root, else $PYMCU_AVR_ORACLE_ROOT, else ../pymcu-avr; the
+driver from --pymcu, else the pymcu beside the running interpreter, else PATH.
 """
 from __future__ import annotations
 
@@ -58,7 +62,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,12 +72,55 @@ import time
 import types
 from pathlib import Path
 
-AVR_ORACLE_ROOT = Path.home() / "Repos" / "pymcu-avr-oraclesweep-ref"
-PROBES_DIR = AVR_ORACLE_ROOT / "tests" / "oracle" / "probes"
-TEST_ORACLE_FILE = AVR_ORACLE_ROOT / "tests" / "oracle" / "test_oracle.py"
+ORACLE_ROOT_ENV = "PYMCU_AVR_ORACLE_ROOT"
 
-REPO_ROOT = Path(__file__).resolve().parents[2]  # pymcu-arm-oracle worktree
+REPO_ROOT = Path(__file__).resolve().parents[2]  # this repo's checkout (pymcu-arm)
 RUNNER_DLL = REPO_ROOT / "build" / "oracle-runner" / "PyMCU.OracleRunner.ARM.dll"
+
+# The corpus and the avr8sharp shim live in a pymcu-avr checkout. Set by main(), from
+# --oracle-root, PYMCU_AVR_ORACLE_ROOT, or the pymcu-avr sibling of this repo.
+AVR_ORACLE_ROOT: Path | None = None
+PROBES_DIR: Path | None = None
+TEST_ORACLE_FILE: Path | None = None
+avr_oracle = None
+
+
+def resolve_oracle_root(explicit: str | None) -> Path:
+    """The pymcu-avr checkout whose tests/oracle/ holds the probes and the avr8sharp shim.
+
+    --oracle-root wins, then PYMCU_AVR_ORACLE_ROOT, then ../pymcu-avr beside this repo.
+    The script does not guess a checkout beyond that: a missing corpus is an error.
+    """
+    if explicit or os.environ.get(ORACLE_ROOT_ENV):
+        raw = explicit or os.environ[ORACLE_ROOT_ENV]
+        root, source = Path(raw).expanduser(), ("--oracle-root" if explicit else ORACLE_ROOT_ENV)
+    else:
+        root, source = REPO_ROOT.parent / "pymcu-avr", "the pymcu-avr sibling of this repo"
+    if not (root / "tests" / "oracle" / "test_oracle.py").is_file():
+        raise SystemExit(f"no pymcu-avr oracle corpus at {root} (from {source}); "
+                         f"pass --oracle-root DIR or set {ORACLE_ROOT_ENV}")
+    return root.resolve()
+
+
+def resolve_pymcu(explicit: str | None) -> Path:
+    """The pymcu driver to build the probes with.
+
+    --pymcu wins. Otherwise the pymcu beside the interpreter running this script (the
+    active venv), then pymcu on PATH. Nothing else is searched.
+    """
+    if explicit:
+        pymcu = Path(explicit).expanduser()
+        if not pymcu.is_file():
+            raise SystemExit(f"--pymcu names {pymcu}, which is not a file")
+        return pymcu
+    beside = Path(sys.executable).parent / "pymcu"
+    if beside.is_file():
+        return beside
+    on_path = shutil.which("pymcu")
+    if on_path:
+        return Path(on_path)
+    raise SystemExit("no pymcu driver: pass --pymcu PATH, run this from a venv that has "
+                     "pymcu-compiler installed, or put pymcu on PATH")
 
 # Matches both the single-name form ("import GPIOR0") and 583's two-name one
 # ("import GPIOR0, GPIOR1"), or any other comma-separated list of register names on the
@@ -154,9 +203,6 @@ def _load_avr_oracle_module():
     finally:
         sys.path.pop(0)
     return module
-
-
-avr_oracle = _load_avr_oracle_module()
 
 
 def probe_files() -> list[Path]:
@@ -337,11 +383,19 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--only", default=None, help="substring filter on probe filename")
-    ap.add_argument("--pymcu", default=str(Path.home() / "Repos/PyMCU-targets3/.venv/bin/pymcu"))
+    ap.add_argument("--oracle-root", default=None,
+                    help=f"pymcu-avr checkout with tests/oracle/ (default: ${ORACLE_ROOT_ENV}, "
+                         "else ../pymcu-avr beside this repo)")
+    ap.add_argument("--pymcu", default=None,
+                    help="pymcu driver (default: the one beside this interpreter, else on PATH)")
     args = ap.parse_args()
 
-    pymcu = Path(args.pymcu)
-    assert pymcu.is_file(), f"pymcu binary not found: {pymcu}"
+    global AVR_ORACLE_ROOT, PROBES_DIR, TEST_ORACLE_FILE, avr_oracle
+    AVR_ORACLE_ROOT = resolve_oracle_root(args.oracle_root)
+    PROBES_DIR = AVR_ORACLE_ROOT / "tests" / "oracle" / "probes"
+    TEST_ORACLE_FILE = AVR_ORACLE_ROOT / "tests" / "oracle" / "test_oracle.py"
+    avr_oracle = _load_avr_oracle_module()
+    pymcu = resolve_pymcu(args.pymcu)
     assert RUNNER_DLL.is_file(), f"runner not built: {RUNNER_DLL}"
 
     probes = probe_files()

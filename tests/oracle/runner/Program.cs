@@ -35,6 +35,9 @@ switch (chip)
             Console.Error.WriteLine($"[runner] rp2040 run raised: {ex}");
         }
         Console.Write(pico.Uart0.Text.Replace("\r\n", "\n"));
+        // The same line rp2350 prints. RP2040Sharp.TestKit 1.0.0 has no HardFault counter:
+        // a HardFault escalates to lockup on this core, so Cpu.IsLockedUp is the observable.
+        Console.Error.WriteLine($"[runner] rp2040 hardfaults=n/a lockup={pico.Cpu.IsLockedUp}");
         return 0;
     }
     case "rp2350":

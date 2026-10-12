@@ -45,4 +45,33 @@ public class UnhandledRaiseAutoInitTests
             .Should().BeTrue("an uncaught raise must halt by printing E:<Name>, same as AVR, "
                               + "even when the program itself never touched the console");
     }
+
+    // Oracle probe 038 again, for the part the first fix left out: AVR prints the message the raise
+    // carried ("E:ValueError: boom"); this runtime printed the type and stopped. The compiler
+    // synthesizes __pymcu_exn_tail for a program whose raise has a message, and AVR's runtime
+    // calls it after the type name; the ARM runtime never did.
+    [Test]
+    public void UncaughtRaiseWithAMessage_PrintsTheMessageAfterTheTypeName()
+    {
+        var firmware = PymcuCompiler.BuildSourceRp2040(Source);
+
+        using var pico = new PicoSimulation(withUsbCdc: false);
+        pico.LoadFlash(firmware);
+
+        pico.RunUntilOutput(pico.Uart0, "E:ValueError: boom\r\n", timeoutMs: 20_000)
+            .Should().BeTrue("the report is E:<Type>: <message>, as on AVR and as CPython words it");
+    }
+
+    [Test]
+    public void UncaughtRaiseWithoutAMessage_StillPrintsJustTheTypeName()
+    {
+        var firmware = PymcuCompiler.BuildSourceRp2040(
+            "def fail():\n    raise ValueError\nfail()\n");
+
+        using var pico = new PicoSimulation(withUsbCdc: false);
+        pico.LoadFlash(firmware);
+
+        pico.RunUntilOutput(pico.Uart0, "E:ValueError\r\n", timeoutMs: 20_000)
+            .Should().BeTrue("a raise with no message reports the bare type name");
+    }
 }

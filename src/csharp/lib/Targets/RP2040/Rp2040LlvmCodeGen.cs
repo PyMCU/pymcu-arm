@@ -81,6 +81,11 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         => program.IsLibrary && name is "__pymcu_exn_flag" or "__pymcu_exn_code" or "__exn_msg"
             ? ", section \".data.rel.ro\", align 4" : "";
 
+    // The program carries __pymcu_exn_tail (the compiler synthesizes it when a raise carries a
+    // message): the unhandled report prints "E:<Type>", calls the tail for ": <message>" and the
+    // line break, and only then halts -- the same sequence AVR's runtime follows.
+    private bool _exnTail;
+
     private bool _exnEnabled;                                       // program uses the exception model
 
     public override void Compile(ProgramIR program, TextWriter output)
@@ -199,6 +204,7 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
                     foreach (var se in f.Body.OfType<SignalError>())
                         if (se.Code is Constant ce && ce.Value != 0)
                             usedCodes.Add(ce.Value);
+                _exnTail = program.Functions.Any(f => f.Name == "__pymcu_exn_tail");
                 EmitExnRuntime(usedCodes);
             }
         }
@@ -279,7 +285,15 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             {
                 switch (instr)
                 {
-                    case Call c: AddRoot(c.FunctionName); break;
+                    case Call c:
+                        AddRoot(c.FunctionName);
+                        // The unhandled-exception runtime is raw LLVM the call graph cannot see; it
+                        // calls the message tail, so reaching it keeps the tail alive.
+                        if (c.FunctionName == "__pymcu_unhandled_exn") AddRoot("__pymcu_exn_tail");
+                        break;
+                    case BranchOnError { ErrorLabel: "__pymcu_unhandled_exn" }:
+                        AddRoot("__pymcu_exn_tail");
+                        break;
                     case VirtualCall vc: AddRoot(vc.MethodName); break;
                 }
                 foreach (var v in OperandsOf(instr))
@@ -1315,7 +1329,9 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             var sb = new StringBuilder();
             sb.Append("E:");
             sb.Append(name);
-            var bytes = sb.ToString().Select(ch => (int)ch).Concat(new[] { 13, 10, 0 }).ToList();
+            // With the tail linked it supplies the line break; without it the table carries it.
+            var bytes = sb.ToString().Select(ch => (int)ch)
+                .Concat(_exnTail ? new[] { 0 } : new[] { 13, 10, 0 }).ToList();
             var enc = new StringBuilder(bytes.Count * 3);
             foreach (var b in bytes) enc.Append('\\').Append(b.ToString("X2"));
             _out.WriteLine($"@__exn_str_{code} = private constant [{bytes.Count} x i8] c\"{enc}\"");
@@ -1379,7 +1395,8 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine("  %p = phi ptr [ %s, %print ], [ %pn, %putc ]");
             _out.WriteLine("  %ch = load i8, ptr %p");
             _out.WriteLine("  %z = icmp eq i8 %ch, 0");
-            _out.WriteLine("  br i1 %z, label %halt, label %wait");
+            _out.WriteLine(_exnTail ? "  br i1 %z, label %tail, label %wait"
+                                    : "  br i1 %z, label %halt, label %wait");
             _out.WriteLine("wait:");
             _out.WriteLine($"  %frv = load volatile i32, ptr inttoptr (i32 {fr} to ptr)");
             _out.WriteLine("  %txff = and i32 %frv, 32");
@@ -1390,6 +1407,12 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
             _out.WriteLine($"  store volatile i32 %chw, ptr inttoptr (i32 {dr} to ptr)");
             _out.WriteLine("  %pn = getelementptr inbounds i8, ptr %p, i32 1");
             _out.WriteLine("  br label %loop");
+        }
+        if (codes.Count > 0 && _exnTail)
+        {
+            _out.WriteLine("tail:");
+            _out.WriteLine($"  call void @{Sym("__pymcu_exn_tail")}()");
+            _out.WriteLine("  br label %halt");
         }
         _out.WriteLine("halt:");
         _out.WriteLine("  call void asm sideeffect \"\", \"\"()");

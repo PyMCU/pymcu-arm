@@ -1,0 +1,16 @@
+[project]
+name = "adafruit-ds18x20-unmodified"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pymcu-stdlib>=0.1.2a5",
+    "pymcu>=0.1.0a27",
+    "pymcu-circuitpython>=0.1.0",
+]
+
+[tool.pymcu]
+board     = "adafruit_feather_rp2040"
+frequency = 125000000
+sources   = "src"
+entry     = "main.py"
+stdlib    = ["circuitpython"]

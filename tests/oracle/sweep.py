@@ -396,10 +396,10 @@ def evaluate(probe: Path, chip: str, tmp_dir: Path, pymcu: Path) -> dict:
         record["detail"] = actual[-200:]
     elif expected == actual:
         record["outcome"] = "match"
-    elif "END\n" not in actual:
-        # No lockup and no END within the budget: a loop, or code that never returns.
+    elif actual.strip() == "" and "END\n" not in actual:
+        # Silence and no lockup: the run never printed anything, so it never reached END
+        # within the budget. A loop, or code that never returns.
         record["outcome"] = "timeout"
-        record["detail"] = actual[-200:]
     else:
         record["outcome"] = "mismatch"
         record["detail"] = avr_oracle.first_difference(expected, actual)

@@ -6,7 +6,14 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="RP2040Sharp.TestKit" Version="1.0.0" />
+    <!-- The published RP2040Sharp reads the PC wrongly in ADD high-register forms (`add pc, r0`,
+         `add r0, pc`), which is how LLVM dispatches a jump table on a Cortex-M0. A program with a
+         switch of four or more cases then runs off into garbage ONLY here, never on silicon or on
+         RP2350 (oracle probes 550 and 294). The fix is in RP2040Sharp's master and not yet on
+         nuget.org: build the runner against a checkout with it by passing
+         -p:RP2040SharpSrc=/path/to/RP2040Sharp, and a sweep on rp2040 is only trustworthy that way. -->
+    <PackageReference Include="RP2040Sharp.TestKit" Version="1.0.0" Condition="'$(RP2040SharpSrc)' == ''" />
+    <ProjectReference Include="$(RP2040SharpSrc)/src/RP2040.TestKit/RP2040.TestKit.csproj" Condition="'$(RP2040SharpSrc)' != ''" />
     <!-- RP2350.TestKit is not published to nuget.org: reference the sibling repo locally,
          the same layout tests/integration/PyMCU.IntegrationTests.csproj assumes, one
          directory deeper here (tests/oracle/runner vs tests/integration). -->

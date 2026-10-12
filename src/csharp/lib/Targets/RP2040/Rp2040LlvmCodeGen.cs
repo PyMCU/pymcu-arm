@@ -1746,7 +1746,13 @@ public class Rp2040LlvmCodeGen(DeviceConfig cfg) : CodeGen
         _out.WriteLine("  %newtop = add i32 %top, %total");
         _out.WriteLine("  %he = ptrtoint ptr @__heap_end to i32");
         _out.WriteLine("  %fits = icmp ule i32 %newtop, %he");
-        _out.WriteLine("  br i1 %fits, label %ok, label %fail");
+        // The header keeps the payload length in 16 bits (zero-extended when read back): a larger
+        // request would be stored truncated, leaving a header that describes a smaller object than
+        // the one handed out. It is refused like any allocation that does not fit, so the program
+        // sees MemoryError.
+        _out.WriteLine("  %small = icmp ule i32 %size, 65535");
+        _out.WriteLine("  %ok2 = and i1 %fits, %small");
+        _out.WriteLine("  br i1 %ok2, label %ok, label %fail");
         _out.WriteLine("ok:");
         _out.WriteLine("  %hdrptr = inttoptr i32 %top to ptr");
         _out.WriteLine("  %flagsbyte = select i1 %refs, i8 64, i8 0");

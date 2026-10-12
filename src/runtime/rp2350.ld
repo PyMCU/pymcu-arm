@@ -34,7 +34,12 @@ _stack_top = ORIGIN(RAM) + LENGTH(RAM);
  * references either symbol, so this costs nothing (pure symbol arithmetic, no section). */
 __PYMCU_GC_HEAP_STACK_RESERVE = 8K;
 __heap_start = _ebss;
-__heap_end = _stack_top - __PYMCU_GC_HEAP_STACK_RESERVE;
+/* The pulse-capture ring (pymcu.hal.rp.pulse, PulseIn): 1 KiB at a 1 KiB boundary just
+ * below the stack reserve, where a DMA channel writes the widths a PIO state machine measures.
+ * pymcu/chips/<chip>.py names the same address (PULSE_RING_BASE); a test keeps the two equal.
+ * The heap stops short of it. */
+__pulse_ring = _stack_top - __PYMCU_GC_HEAP_STACK_RESERVE - 1K;
+__heap_end = __pulse_ring;
 
 ENTRY(Reset_Handler)
 

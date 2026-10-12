@@ -47,16 +47,22 @@ def main():
         using var pico = new PicoSimulation(withUsbCdc: false);
         pico.LoadFlash(_firmware);
         var edges = new List<Edge>();
-        bool last = pico.Gpio[Pin].DigitalValue;
+        bool last = Level(pico);
         long end = (long)(microseconds * SysClkHz / 1e6);
         while (pico.Cpu.Cycles < end)
         {
             pico.RunCycles(1);
-            bool v = pico.Gpio[Pin].DigitalValue;
+            bool v = Level(pico);
             if (v != last) { edges.Add(new Edge(pico.Cpu.Cycles, v)); last = v; }
         }
         return edges;
     }
+
+    // What the pad drives, whichever peripheral owns the pin. GpioPin.DigitalValue answers from SIO
+    // alone, so a pin that was a SIO output before it was handed to PIO (a DigitalInOut does that)
+    // would read as its stale SIO level.
+    private static bool Level(PicoSimulation pico)
+        => pico.Rp2040.IoBank0.GetPadOutputEnable(Pin) && pico.Rp2040.IoBank0.GetPadOutputLevel(Pin);
 
     private static double Ns(long cycles) => cycles * 1e9 / SysClkHz;
 
@@ -136,6 +142,6 @@ def main():
 
         pico.RunMicroseconds(400);
 
-        pico.Gpio[Pin].DigitalValue.Should().BeFalse();
+        Level(pico).Should().BeFalse();
     }
 }

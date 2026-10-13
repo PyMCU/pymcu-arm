@@ -20,14 +20,9 @@ public class UnionMatchDispatchTests
     private const string Source =
         "from typing import Union\n" +
         "from pymcu.types import ptr, uint8\n" +
-        // Further below top-of-RAM than the usual 0x20041FF0 scratch convention (see
-        // RoundTwoArgTests/FloatArrayElementTests): this probe re-reads the scratch byte
-        // THREE times across two match statements -- PicoSimulation's own stack (distinct
-        // from the oracle sweep's RP2040Sharp-direct harness, which measured this probe
-        // clean) grows deep enough between the first and second read to clobber a byte
-        // only 16 bytes below top. 4 KiB of margin is far more than this probe's shallow
-        // call depth could ever reach.
-        "GPIOR0: ptr[uint8] = ptr(0x20041000)\n" +
+        // GPIOR0 is WATCHDOG_SCRATCH0, not a byte of SRAM. See Rp2040Scratch for why
+        // the probe needs a byte that reads 0 at start and sits outside the stack.
+        "GPIOR0: ptr[uint8] = ptr(" + Rp2040Scratch.GPIOR0Address + ")\n" +
         "from pymcu.hal.console import print\n" +
         "\n" +
         "\n" +

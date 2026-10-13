@@ -30,7 +30,7 @@ public class RoundTwoArgTests
     // scratch RAM ptr -- the same adaptation tests/oracle/sweep.py makes for this probe.
     private const string Source =
         "from pymcu.types import ptr, uint8\n" +
-        "GPIOR0: ptr[uint8] = ptr(0x20041FF0)\n" +
+        "GPIOR0: ptr[uint8] = ptr(" + Rp2040Scratch.GPIOR0Address + ")\n" +
         "\n" +
         "s = GPIOR0.value\n" +
         "x: float = float(s) / 7.0 + 3.14159\n" +

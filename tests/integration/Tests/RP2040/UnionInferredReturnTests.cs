@@ -19,7 +19,7 @@ public class UnionInferredReturnTests
     // equivalent scratch RAM ptr -- the same adaptation tests/oracle/sweep.py makes.
     private const string Source =
         "from pymcu.types import ptr, uint8\n" +
-        "GPIOR0: ptr[uint8] = ptr(0x20041FF0)\n" +
+        "GPIOR0: ptr[uint8] = ptr(" + Rp2040Scratch.GPIOR0Address + ")\n" +
         "from pymcu.hal.console import print\n" +
         "\n" +
         "\n" +

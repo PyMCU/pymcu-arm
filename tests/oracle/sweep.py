@@ -134,21 +134,24 @@ GPIOR_IMPORT_RE = re.compile(
 CHIP_MODULE_IMPORT_RE = re.compile(
     r"import pymcu\.chips\.atmega328p as (\w+)")
 
-# Scratch byte near the top of each chip's SRAM, standing in for the AVR's GPIOR0 spare
-# register. Same ptr[uint8] shape as every real per-chip register table in lib/src/pymcu/chips.
-# A probe naming more than one register (583's GPIOR0, GPIOR1) gets one scratch byte per
-# name, immediately above this one -- SCRATCH_ADDR + 1, + 2, ... -- so they never alias.
+# A byte that stands in for the AVR's GPIOR0 spare register: it reads 0 when the program
+# starts and nothing else writes it. Same ptr[uint8] shape as every real per-chip register table
+# in lib/src/pymcu/chips. It is the watchdog's WATCHDOG_SCRATCH0, not SRAM: the stack grows down
+# from the top of RAM, so a byte there takes whatever a deep call chain left in it (see
+# tests/integration/Rp2040Scratch.cs). A probe naming more than one register (583's GPIOR0,
+# GPIOR1) gets SCRATCH_ADDR + 1, + 2, ...: the other bytes of the same scratch word, zero too.
 SCRATCH_ADDR = {
-    "rp2040": 0x20041FF0,   # RAM 0x20000000 + 264 KiB, 16 bytes below top
-    "rp2350": 0x2007FFF0,   # RAM 0x20000000 + 512 KiB, 16 bytes below top
+    "rp2040": 0x4005800C,   # WATCHDOG base 0x40058000 + SCRATCH0 offset 0x0C, reset 0
+    "rp2350": 0x400D800C,   # WATCHDOG base 0x400D8000 + SCRATCH0 offset 0x0C, reset 0
 }
 
 # 196's `BASE: const[uint16] = 0x0400` (free SRAM on the ATmega328P, used as a direct
 # 16-bit pointer base) and 277/278's `BASE: const[uint8] = 0x04` (the same address, written
 # as a page number: `BASE * 256` == 0x0400) both assume AVR's low SRAM map. On RP2040/RP2350
-# 0x0400 is inside BOOTROM. These sit further below SCRATCH_ADDR's byte -- enough room for
-# 196's `ptr(BASE + 256)` and 277's two-register block (`BASE*256`, `BASE*256 + 1`) -- so
-# neither collides with GPIOR0's replacement or each other. Widened to uint32: the whole
+# 0x0400 is inside BOOTROM. These sit in SRAM near the top of RAM, with room for 196's
+# `ptr(BASE + 256)` and 277's two-register block (`BASE*256`, `BASE*256 + 1`) so neither
+# collides with the other. They are still SRAM, so the stack can reach them in a deep call
+# chain; SCRATCH_ADDR no longer shares that exposure. Widened to uint32: the whole
 # reason this needs code, not a same-width literal swap, is that uint8/uint16 cannot hold a
 # 32-bit SRAM address, the way GPIOR0's ptr[uint8] holds AVR's 16-bit one.
 BASE196_ADDR = {

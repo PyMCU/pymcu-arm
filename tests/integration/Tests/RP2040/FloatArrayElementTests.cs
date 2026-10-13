@@ -27,7 +27,7 @@ public class FloatArrayElementTests
     // NarrowFromI32/WidenToI32 helpers the fix changed.
     private const string Source =
         "from pymcu.types import ptr, uint8, inline\n" +
-        "GPIOR0: ptr[uint8] = ptr(0x20041FF0)\n" +
+        "GPIOR0: ptr[uint8] = ptr(" + Rp2040Scratch.GPIOR0Address + ")\n" +
         "\n" +
         "s = GPIOR0.value\n" +
         "\n" +

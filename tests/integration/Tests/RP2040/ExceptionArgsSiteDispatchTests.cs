@@ -41,7 +41,7 @@ public class ExceptionArgsSiteDispatchTests
     // first raise's argument is a genuine non-constant OSError arg, like the real probe.
     private const string Source =
         "from pymcu.types import ptr, uint8\n" +
-        "GPIOR0: ptr[uint8] = ptr(0x20041FF0)\n" +
+        "GPIOR0: ptr[uint8] = ptr(" + Rp2040Scratch.GPIOR0Address + ")\n" +
         "\n" +
         "try:\n" +
         "    raise OSError(GPIOR0.value + 110)\n" +

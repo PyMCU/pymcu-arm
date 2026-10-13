@@ -24,7 +24,7 @@ public class HeapListNegativeIndexTests
         // makes for this probe. The scratch byte boots to 0, so g0 == 0 here too.
         var firmware = PymcuCompiler.BuildSourceRp2040(
             "from pymcu.types import ptr, uint8, uint16, int32\n" +
-            "GPIOR0: ptr[uint8] = ptr(0x20041FF0)\n" +
+            "GPIOR0: ptr[uint8] = ptr(" + Rp2040Scratch.GPIOR0Address + ")\n" +
             "g0 = GPIOR0.value\n" +
             "xs: list[uint8] = []\n" +
             "xs.append(g0 + 5)\n" +

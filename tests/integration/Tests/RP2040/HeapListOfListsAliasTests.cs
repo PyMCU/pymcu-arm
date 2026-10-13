@@ -30,7 +30,7 @@ public class HeapListOfListsAliasTests
         // scratch RAM ptr -- the same adaptation tests/oracle/sweep.py makes.
         var firmware = PymcuCompiler.BuildSourceRp2040(
             "from pymcu.types import ptr, uint8\n" +
-            "GPIOR0: ptr[uint8] = ptr(0x20041FF0)\n" +
+            "GPIOR0: ptr[uint8] = ptr(" + Rp2040Scratch.GPIOR0Address + ")\n" +
             "s = GPIOR0.value\n" +
             "cells: list[list[uint8]] = [[s, s + 1], [s + 2, s + 3]]\n" +
             "y: uint8 = 1\n" +
